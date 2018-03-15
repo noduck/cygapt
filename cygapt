@@ -3,5 +3,135 @@
 use strict;
 use warnings;
 use feature qw(:5.20);
+use Getopt::Long;
+use Text::Glob qw(glob_to_regex);
 
+use constant {
+	SETUP => "/etc/setup/setup.rc",
+	INSTALLED => "/etc/setup/installed.db",
+};
+my (%setup, %package);
 
+my ($installed, $upgradeable, $allversions, $verbose) = @_;
+GetOptions(
+	"installed"	=> \$installed,
+	"upgradeable"	=> \$upgradeable,
+	"all-version"	=> \$allversions,
+	"v|verbose"	=> \$verbose,
+	"h|help"	=> sub { usage() },
+) or usage("");
+
+get_setup();
+get_installed();
+
+usage()
+	unless @ARGV;
+my $cmd = shift @ARGV;
+
+if ($cmd eq 'list') {
+	list(@ARGV);
+} elsif ($cmd eq 'install') {
+} elsif ($cmd eq 'remove') {
+} elsif ($cmd eq 'update') {
+} elsif ($cmd eq 'upgrade') {
+} else {
+	print STDERR "E: Invalid command $cmd\n";
+	exit 10;
+}
+
+sub list {
+	my $re;
+       
+	if (@_) {
+		$re = join('|', map glob_to_regex($_), @_);
+		$re = qr/^($re)$/;
+		print STDERR "Match: $re\n"
+			if $verbose;
+	}
+
+	for my $p (sort keys %package) {
+		next
+			if $re && $p !~ $re;
+		print "$p/now ", join(" ", keys %{$package{$p}}), "\n";
+	}
+}
+
+sub get_setup {
+	my $fh;
+
+	unless (open $fh, '<', SETUP) {
+		print STDERR "E: Cannot open ", SETUP, ": $!\n";
+		exit 10;
+	}
+
+	my $key;
+	while(<$fh>) {
+		if ($key && /^\s+(\S.*)\r?\n/) {
+			push @{$setup{$key}}, $_;
+		} elsif (/^(\S+)\s*$/) {
+			$key = $1;
+		} else {
+			print STDERR "W: Did not recognize ", SETUP,
+				" format", $key ? " section $key" : "",
+				": $_";
+		}
+
+	}
+
+	close ($fh);
+}
+
+sub get_installed {
+	my $fh;
+
+	unless (open $fh, '<', INSTALLED) {
+		print STDERR "E: Cannot open ", INSTALLED, ": $!\n";
+		exit 10;
+	}
+
+	my $version;
+	while(<$fh>) {
+		if (/^INSTALLED.DB\s+(\d+)/) {
+			$version = $1;
+			next;
+		}
+
+		unless (/^(\S+)\s+\1-(\S+)\.tar\.\S+\s+(\d+)$/) {
+			print STDERR "W: Did not recognize ", INSTALLED,
+				" format: $_";
+			next;
+		}
+
+		my ($pack, $version, $inst) = ($1, $2, $3);
+		$package{$pack}{$version} = {
+			installed => 1,
+		};
+	}
+
+	close($fh);
+}
+
+sub usage {
+	print STDERR @_, "\n"
+		if @_;
+	print STDERR <<USAGE;
+Usage: cygapt [options] command
+
+cygapt is a commandline package manager for Cygwin, that tries to provide
+a similar interface as APT on Debian.
+
+Commands:
+  list - list packages based on package names
+  install - install packages
+  remove - remove packages
+  update - update list of available packages
+  upgrade - upgrade the system by installing/upgrading packages
+
+Options:
+  -y, --yes
+  -v, --verbose
+  -h, --help
+USAGE
+
+	exit @_ ? 10 : 0;
+}
