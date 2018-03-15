@@ -12,11 +12,14 @@ use constant {
 };
 my (%setup, %package);
 
-my ($installed, $upgradeable, $allversions, $verbose) = @_;
+my ($installed, $upgradeable, $allversions,
+	$yes, $purge, $verbose);
 GetOptions(
 	"installed"	=> \$installed,
 	"upgradeable"	=> \$upgradeable,
 	"all-version"	=> \$allversions,
+	"y|yes"		=> \$yes,
+	"purge"		=> \$purge,
 	"v|verbose"	=> \$verbose,
 	"h|help"	=> sub { usage() },
 ) or usage("");
@@ -52,7 +55,10 @@ sub list {
 	for my $p (sort keys %package) {
 		next
 			if $re && $p !~ $re;
-		print "$p/now ", join(" ", keys %{$package{$p}}), "\n";
+		print "$p/now ",
+			join(" ", keys %{$package{$p}}),
+			" [installed]",
+			"\n";
 	}
 }
 
