@@ -4,42 +4,63 @@ use strict;
 use warnings;
 use feature qw(:5.20);
 use Getopt::Long;
+use LWP;
+use URI::Escape qw(uri_escape);
 use Text::Glob qw(glob_to_regex);
+use POSIX qw(uname);
 
 use constant {
 	SETUP => "/etc/setup/setup.rc",
 	INSTALLED => "/etc/setup/installed.db",
+	# not using the cache from setup.ini
+	CACHE => "/var/cache/cygapt",
 };
 my (%setup, %package);
 
 my ($installed, $upgradeable, $allversions,
 	$yes, $purge, $verbose);
 GetOptions(
-	"installed"	=> \$installed,
-	"upgradeable"	=> \$upgradeable,
-	"all-version"	=> \$allversions,
+	"a|all-versions" => \$allversions,
+	"i|installed"	=> \$installed,
+	"u|upgradeable"	=> \$upgradeable,
 	"y|yes"		=> \$yes,
 	"purge"		=> \$purge,
 	"v|verbose"	=> \$verbose,
 	"h|help"	=> sub { usage() },
 ) or usage("");
 
-get_setup();
-get_installed();
 
 usage()
 	unless @ARGV;
 my $cmd = shift @ARGV;
 
+if ($cmd eq 'vcmp' && @ARGV == 2) {
+	my $a = v2va($ARGV[0]);
+	my $b = v2va($ARGV[1]);
+	my $cmp = vacmp($a, $b);
+	print "$ARGV[0] ", ($cmp > 0 ? ">" : $cmp < 0 ? "<" : "=="),
+		" $ARGV[1]\n";
+	exit 0;
+} elsif ($cmd !~ /^(?:list|show|install|remove|
+	update|upgrade|clean|autoremove)$/x) {
+	print STDERR "E: Invalid command $cmd\n";
+	exit 10;
+}
+
+get_setup();
+get_installed();
+get_available();
+
 if ($cmd eq 'list') {
 	list(@ARGV);
+} elsif ($cmd eq 'show') {
+	show(@ARGV);
 } elsif ($cmd eq 'install') {
 } elsif ($cmd eq 'remove') {
 } elsif ($cmd eq 'update') {
 } elsif ($cmd eq 'upgrade') {
-} else {
-	print STDERR "E: Invalid command $cmd\n";
-	exit 10;
+} elsif ($cmd eq 'clean') {
+} elsif ($cmd eq 'autoremove') {
 }
 
 sub list {
@@ -52,12 +73,29 @@ sub list {
 			if $verbose;
 	}
 
-	for my $p (sort keys %package) {
+	for my $pack (sort keys %package) {
 		next
-			if $re && $p !~ $re;
-		print "$p/now ",
-			join(" ", keys %{$package{$p}}),
-			" [installed]",
+			if $re && $pack !~ $re;
+		my $p = $package{$pack};
+
+		next
+			if $installed && ! $p->{v_installed};
+
+		select_package_versions($p);
+
+		# upgradeable needs to be installed, and not the upgrade
+		# version
+# TODO: what about downgrades?
+		next
+			if $upgradeable
+			&& (! $p->{v_installed}
+				|| $p->{v_installed} eq $p->{v_upgrade});
+
+#use Data::Dumper;
+#print Dumper($p);
+		my ($v) = values %{$p->{versions}};
+		print "$pack/", join(",", @{$v->{tag}}), " ", $v->{version},
+			$v->{installed} ?  " [installed]" : "",
 			"\n";
 	}
 }
@@ -73,9 +111,9 @@ sub get_setup {
 	my $key;
 	while(<$fh>) {
 		if ($key && /^\s+(\S.*)\r?\n/) {
-			push @{$setup{$key}}, $_;
+			push @{$setup{$key}}, $1;
 		} elsif (/^(\S+)\s*$/) {
-			$key = $1;
+			($key = $1) =~ s/-/_/g;
 		} else {
 			print STDERR "W: Did not recognize ", SETUP,
 				" format", $key ? " section $key" : "",
@@ -85,6 +123,14 @@ sub get_setup {
 	}
 
 	close ($fh);
+
+	unless (exists $setup{last_mirror}) {
+		print STDERR "E: Did not find last-mirror in ", SETUP, "\n";
+		exit 10;
+	}
+
+	$setup{last_cache} = CACHE."/".uri_escape($setup{last_mirror}[0]);
+	($setup{arch} = (uname)[4]) =~ s/^i6/x/;
 }
 
 sub get_installed {
@@ -107,14 +153,200 @@ sub get_installed {
 				" format: $_";
 			next;
 		}
+		my ($pack, $version, $picked) = ($1, $2, $3);
 
-		my ($pack, $version, $inst) = ($1, $2, $3);
-		$package{$pack}{$version} = {
-			installed => 1,
-		};
+		my $p;
+		if (exists $package{$pack}) {
+			$p = $package{$pack};
+		} else {
+			$p = $package{$pack} = { versions => { } }
+		}
+		$p->{v_installed} = $version;
+		$p->{picked} = $picked;
+
+		my $v;
+		if (exists $p->{versions}{$version}) {
+			$v = $p->{versions}{$version};
+		} else {
+			$v = $p->{versions}{$version} = {
+				version => $version,
+				va => v2va($version),
+			};
+		}
+
+		$v->{installed} = 1;
+		$v->{version} = $version;
+		push @{$v->{tag}}, 'now';
 	}
 
 	close($fh);
+}
+
+sub get_available {
+	my $fh;
+	my $setup_name = join("/", $setup{last_cache},
+		$setup{arch}, "setup.ini");
+
+	unless (open $fh, '<', $setup_name) {
+		print STDERR "E: Cannot open ", $setup_name, ": $!\n";
+		exit 10;
+	}
+
+	my ($key, $val);
+	while(<$fh>) {
+		next
+			if /^\s*#/;
+
+		last
+			if /^\s*$/;
+
+	}
+
+	my ($pack, $tag, $vals);
+	while(<$fh>) {
+		chomp;
+
+		if (/^\@\s+(\S+)/) {
+			$pack = $1;
+			$tag = 'current';
+			#print "package $pack\n";
+			next;
+		} elsif (/^\[(\S+)\]/) {
+			# store
+			_available_store($pack, $tag, $vals);
+			$tag = $1;
+			$vals = undef;
+			next;
+		} elsif ($key && defined $val) {
+			$val .= "\n$_";
+		} elsif (/^\s*$/) {
+			# store
+			_available_store($pack, $tag, $vals);
+			$pack = undef;
+			$vals = undef;
+			next;
+		} elsif (/^(\S+):\s+(.*)$/) {
+			($key, $val) = ($1, $2);
+		} else {
+			print STDERR "W: Did not recognize $setup_name",
+				" line $. format: $_\n";
+			next;
+		}
+
+		#print "Val '$val'\n";
+		my $q = () = $val =~ /"/g;
+		next
+			if $q & 1;
+
+		#print "store key $key\n";
+		$vals->{$key} = $val;
+		$key = undef;
+	}
+
+	close($fh);
+}
+
+sub _available_store {
+	my ($pack, $tag, $vals) = @_;
+
+	unless (exists $vals->{version}) { # && exists $vals->{sdesc}) {
+		print STDERR "W: package $pack doesn't have ",
+			"'version' tag\n";
+		return;
+	}
+	my $version = $vals->{version};
+
+	my $p;
+	if (exists $package{$pack}) {
+		$p = $package{$pack};
+	} else {
+		$p = $package{$pack} = { versions => { } };
+	}
+	
+	for my $k (qw(sdesc ldesc category message)) {
+		next
+			unless exists $vals->{$k};
+		my $t = $vals->{$k};
+		$t =~ s/^"(.*)"$/$1/ms;
+		$p->{$k} = $t;
+		delete $vals->{$k};
+	}
+
+	my $v;
+	if (exists $p->{versions}{$version}) {
+		$v = $p->{versions}{$version};
+	} else {
+		$v = $p->{versions}{$version} = {
+			version => $version,
+			va => v2va($version),
+		};
+	}
+
+	push @{$v->{tag}}, $tag;
+	for my $k (keys %$vals) {
+		$v->{$k} = $vals->{$k};
+	}
+}
+
+sub select_package_versions {
+	my ($p) = @_;
+
+	my @v = sort { vacmp($a->{va}, $b->{va}) } values %{$p->{versions}};
+
+	$p->{v_latest} = $v[-1]{version};
+
+	my $target = $v[-1]{version};
+	my $i = $#v;
+	while($i >= 0 && $v[$i]{tag}[0] eq 'test') {
+		$i--;
+	}
+	$target = $v[$i]{version}
+		unless $i < 0 && $v[$i]{tag}[0] eq 'test';
+	$p->{v_upgrade} = $target;
+}
+
+sub v2va {
+	# split into groups of non-digits and digits
+	# first is a group of digits
+	return [ defined $_[0] ? split(/(\d+)/, $_[0]) : ('') ]
+}
+
+sub vacmp {
+	my ($a, $b) = @_;
+	my $i = 0;
+
+	while(1) {
+		last
+			unless $i < @$a && $i < @$b;
+		my $cmp = $a->[$i] cmp $b->[$i];
+		return $cmp
+			if $cmp;
+		$i++;
+
+		last
+			unless $i < @$a && $i < @$b;
+		$cmp = $a->[$i] <=> $b->[$i];
+		return $cmp
+			if $cmp;
+		$i++;
+	}
+
+	if (@$a == @$b) {
+		return 0;
+	} elsif ($i < @$a) {
+		return +1;
+	} else {
+		return -1;
+	}
+}
+
+sub mkdir_p {
+	my ($dir) = @_;
+	return
+		if -d $dir;
+	(my $up = $dir) =~ s{/[^/]*$}{};
+	mkdir_p($up);
+	mkdir $dir;
 }
 
 sub usage {
