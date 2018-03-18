@@ -108,9 +108,12 @@ sub list {
 		next
 			if $re && $pack !~ $re;
 		my $p = $package{$pack};
-		local ($target_release, $target_version);
-		$target_release = $t_rel[$idx];
-		$target_version = $t_ver[$idx];
+		local ($target_release, $target_version)
+			= ($target_release, $target_version);
+		if (defined $idx) {
+			$target_release = $t_rel[$idx];
+			$target_version = $t_ver[$idx];
+		}
 
 		next
 			if $installed && ! $p->{v_installed};
@@ -122,6 +125,7 @@ sub list {
 		next
 			if $upgradable
 			&& (! $p->{v_installed}
+				|| ! $p->{v_target}
 				|| $p->{v_installed} eq $p->{v_target});
 
 		print Dumper($p)
