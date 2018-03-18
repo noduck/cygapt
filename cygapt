@@ -8,6 +8,7 @@ use LWP;
 use URI::Escape qw(uri_escape);
 use Text::Glob qw(glob_to_regex);
 use POSIX qw(uname);
+use Data::Dumper;
 
 use constant {
 	SETUP => "/etc/setup/setup.rc",
@@ -17,17 +18,27 @@ use constant {
 };
 my (%setup, %package);
 
-my ($installed, $upgradeable, $allversions,
+my ($installed, $upgradeable, $allversions, $target_release, $targer_version,
 	$yes, $purge, $verbose);
+my $root = '';
 GetOptions(
-	"a|all-versions" => \$allversions,
 	"i|installed"	=> \$installed,
 	"u|upgradeable"	=> \$upgradeable,
+	"a|all-versions" => \$allversions,
+	"t|target"	=> \$target_release,
 	"y|yes"		=> \$yes,
 	"purge"		=> \$purge,
 	"v|verbose"	=> \$verbose,
 	"h|help"	=> sub { usage() },
+	"root=s"	=> \$root,
 ) or usage("");
+
+if (! $root) {
+} elsif (! -d $root) {
+	print STDERR "E: root directory $root is not accessible: $!\n";
+	exit 10;
+} elsif ($root =~ s{/+$}{}) {
+}
 
 
 usage()
@@ -55,6 +66,9 @@ if ($cmd eq 'list') {
 	list(@ARGV);
 } elsif ($cmd eq 'show') {
 	show(@ARGV);
+} elsif (1) {
+	print STDERR "E: Not implemented yet\n";
+	exit 10;
 } elsif ($cmd eq 'install') {
 } elsif ($cmd eq 'remove') {
 } elsif ($cmd eq 'update') {
@@ -64,6 +78,10 @@ if ($cmd eq 'list') {
 }
 
 sub list {
+	local ($target_release, $target_version)
+		= ($target_release, $target_version);
+# TODO: also do show
+# TODO: set $target_release and $target_version
 	my $re;
        
 	if (@_) {
@@ -91,20 +109,38 @@ sub list {
 			&& (! $p->{v_installed}
 				|| $p->{v_installed} eq $p->{v_upgrade});
 
-#use Data::Dumper;
-#print Dumper($p);
-		my ($v) = values %{$p->{versions}};
-		print "$pack/", join(",", @{$v->{tag}}), " ", $v->{version},
-			$v->{installed} ?  " [installed]" : "",
-			"\n";
+		print Dumper($p)
+			if $verbose;
+
+		for my $v ($allversions
+			? map $p->{versions}{$_}, reverse @{$p->{v_sorted}}
+			: $p->{versions}{$p->{v_upgrade}}) {
+			my @t;
+			push @t, 'installed'
+				if $v->{installed};
+			push @t, "upgradable from: $p->{v_installed}"
+				if $p->{v_installed} && ! $v->{installed}
+				&& $v->{version} eq $p->{v_upgrade};
+			push @t, "upgradable to: $p->{v_upgrade}"
+				if $v->{installed}
+				&& $v->{version} ne $p->{v_upgrade};
+
+			print "$pack/", join(",", @{$v->{tag}}), " ",
+				$v->{version},
+				@t ? " [".join(",", @t)."]" : "",
+				"\n";
+		}
+
+		print "\n"
+			if $allversions;
 	}
 }
 
 sub get_setup {
 	my $fh;
 
-	unless (open $fh, '<', SETUP) {
-		print STDERR "E: Cannot open ", SETUP, ": $!\n";
+	unless (open $fh, '<', $root.SETUP) {
+		print STDERR "E: Cannot open ", $root.SETUP, ": $!\n";
 		exit 10;
 	}
 
@@ -115,7 +151,7 @@ sub get_setup {
 		} elsif (/^(\S+)\s*$/) {
 			($key = $1) =~ s/-/_/g;
 		} else {
-			print STDERR "W: Did not recognize ", SETUP,
+			print STDERR "W: Did not recognize ", $root.SETUP,
 				" format", $key ? " section $key" : "",
 				": $_";
 		}
@@ -136,8 +172,8 @@ sub get_setup {
 sub get_installed {
 	my $fh;
 
-	unless (open $fh, '<', INSTALLED) {
-		print STDERR "E: Cannot open ", INSTALLED, ": $!\n";
+	unless (open $fh, '<', $root.INSTALLED) {
+		print STDERR "E: Cannot open ", $root.INSTALLED, ": $!\n";
 		exit 10;
 	}
 
@@ -149,7 +185,7 @@ sub get_installed {
 		}
 
 		unless (/^(\S+)\s+\1-(\S+)\.tar\.\S+\s+(\d+)$/) {
-			print STDERR "W: Did not recognize ", INSTALLED,
+			print STDERR "W: Did not recognize ", $root.INSTALLED,
 				" format: $_";
 			next;
 		}
@@ -184,7 +220,7 @@ sub get_installed {
 
 sub get_available {
 	my $fh;
-	my $setup_name = join("/", $setup{last_cache},
+	my $setup_name = $root.join("/", $setup{last_cache},
 		$setup{arch}, "setup.ini");
 
 	unless (open $fh, '<', $setup_name) {
@@ -291,7 +327,9 @@ sub _available_store {
 sub select_package_versions {
 	my ($p) = @_;
 
+# TODO: consider $target_release and $target_version
 	my @v = sort { vacmp($a->{va}, $b->{va}) } values %{$p->{versions}};
+	$p->{v_sorted} = [ map $_->{version}, @v ];
 
 	$p->{v_latest} = $v[-1]{version};
 
