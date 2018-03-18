@@ -18,14 +18,14 @@ use constant {
 };
 my (%setup, %package);
 
-my ($installed, $upgradeable, $allversions, $target_release, $targer_version,
-	$yes, $purge, $verbose);
+my ($installed, $upgradable, $allversions, $yes, $purge, $verbose);
+our ($target_release, $target_version);
 my $root = '';
 GetOptions(
 	"i|installed"	=> \$installed,
-	"u|upgradeable"	=> \$upgradeable,
+	"u|upgradable|upgradeable" => \$upgradable,
 	"a|all-versions" => \$allversions,
-	"t|target"	=> \$target_release,
+	"t|target=s"	=> \$target_release,
 	"y|yes"		=> \$yes,
 	"purge"		=> \$purge,
 	"v|verbose"	=> \$verbose,
@@ -40,6 +40,8 @@ if (! $root) {
 } elsif ($root =~ s{/+$}{}) {
 }
 
+$target_release = glob2re($target_release)
+	if $target_release;
 
 usage()
 	unless @ARGV;
@@ -63,6 +65,7 @@ get_installed();
 get_available();
 
 if ($cmd eq 'list') {
+	print "Listing... Done\n";
 	list(@ARGV);
 } elsif ($cmd eq 'show') {
 	show(@ARGV);
@@ -78,15 +81,25 @@ if ($cmd eq 'list') {
 }
 
 sub list {
-	local ($target_release, $target_version)
-		= ($target_release, $target_version);
+	my $idx;
 # TODO: also do show
-# TODO: set $target_release and $target_version
+#
+	my (@re, @t_rel, @t_ver);
+	for (@_) {
+		print STDERR "W: only select target version or release: $_\n"
+			if m{/} && m{=};
+
+ 		push @t_rel, s{/(\S+)}{} ? glob2re($1) : $target_release;
+		push @t_ver, s{=(\S+)}{} ? glob2re($1) : $target_version;
+
+		push @re, glob2re($_)."(?{ \$idx = ".scalar(@re)." })";
+	}
+
 	my $re;
-       
-	if (@_) {
-		$re = join('|', map glob_to_regex($_), @_);
-		$re = qr/^($re)$/;
+	if (@re) {
+		use re 'eval';
+		$re = join('|', @re);
+		$re = qr/(?:$re)/;
 		print STDERR "Match: $re\n"
 			if $verbose;
 	}
@@ -95,37 +108,42 @@ sub list {
 		next
 			if $re && $pack !~ $re;
 		my $p = $package{$pack};
+		local ($target_release, $target_version);
+		$target_release = $t_rel[$idx];
+		$target_version = $t_ver[$idx];
 
 		next
 			if $installed && ! $p->{v_installed};
 
 		select_package_versions($p);
 
-		# upgradeable needs to be installed, and not the upgrade
+		# upgradable needs to be installed, and not the upgrade
 		# version
-# TODO: what about downgrades?
 		next
-			if $upgradeable
+			if $upgradable
 			&& (! $p->{v_installed}
-				|| $p->{v_installed} eq $p->{v_upgrade});
+				|| $p->{v_installed} eq $p->{v_target});
 
 		print Dumper($p)
 			if $verbose;
 
 		for my $v ($allversions
 			? map $p->{versions}{$_}, reverse @{$p->{v_sorted}}
-			: $p->{versions}{$p->{v_upgrade}}) {
+			: $p->{versions}{$p->{v_target}}) {
 			my @t;
 			push @t, 'installed'
 				if $v->{installed};
+# TODO: change "upgradable" to "downgradable" when needed?
 			push @t, "upgradable from: $p->{v_installed}"
 				if $p->{v_installed} && ! $v->{installed}
-				&& $v->{version} eq $p->{v_upgrade};
-			push @t, "upgradable to: $p->{v_upgrade}"
+				&& $p->{v_target}
+				&& $v->{version} eq $p->{v_target};
+			push @t, "upgradable to: $p->{v_target}"
 				if $v->{installed}
-				&& $v->{version} ne $p->{v_upgrade};
+				&& $p->{v_target}
+				&& $v->{version} ne $p->{v_target};
 
-			print "$pack/", join(",", @{$v->{tag}}), " ",
+			print "$pack/", join(",", @{$v->{releases}}), " ",
 				$v->{version},
 				@t ? " [".join(",", @t)."]" : "",
 				"\n";
@@ -195,7 +213,10 @@ sub get_installed {
 		if (exists $package{$pack}) {
 			$p = $package{$pack};
 		} else {
-			$p = $package{$pack} = { versions => { } }
+			$p = $package{$pack} = {
+				name => $pack,
+				versions => { },
+			};
 		}
 		$p->{v_installed} = $version;
 		$p->{picked} = $picked;
@@ -212,7 +233,7 @@ sub get_installed {
 
 		$v->{installed} = 1;
 		$v->{version} = $version;
-		push @{$v->{tag}}, 'now';
+		push @{$v->{releases}}, 'now';
 	}
 
 	close($fh);
@@ -238,26 +259,26 @@ sub get_available {
 
 	}
 
-	my ($pack, $tag, $vals);
+	my ($pack, $rel, $vals);
 	while(<$fh>) {
 		chomp;
 
 		if (/^\@\s+(\S+)/) {
 			$pack = $1;
-			$tag = 'current';
+			$rel = 'current';
 			#print "package $pack\n";
 			next;
 		} elsif (/^\[(\S+)\]/) {
 			# store
-			_available_store($pack, $tag, $vals);
-			$tag = $1;
+			_available_store($pack, $rel, $vals);
+			$rel = $1;
 			$vals = undef;
 			next;
 		} elsif ($key && defined $val) {
 			$val .= "\n$_";
 		} elsif (/^\s*$/) {
 			# store
-			_available_store($pack, $tag, $vals);
+			_available_store($pack, $rel, $vals);
 			$pack = undef;
 			$vals = undef;
 			next;
@@ -283,7 +304,7 @@ sub get_available {
 }
 
 sub _available_store {
-	my ($pack, $tag, $vals) = @_;
+	my ($pack, $rel, $vals) = @_;
 
 	unless (exists $vals->{version}) { # && exists $vals->{sdesc}) {
 		print STDERR "W: package $pack doesn't have ",
@@ -296,7 +317,10 @@ sub _available_store {
 	if (exists $package{$pack}) {
 		$p = $package{$pack};
 	} else {
-		$p = $package{$pack} = { versions => { } };
+		$p = $package{$pack} = {
+			name => $pack,
+			versions => { },
+		};
 	}
 	
 	for my $k (qw(sdesc ldesc category message)) {
@@ -318,7 +342,7 @@ sub _available_store {
 		};
 	}
 
-	push @{$v->{tag}}, $tag;
+	push @{$v->{releases}}, $rel;
 	for my $k (keys %$vals) {
 		$v->{$k} = $vals->{$k};
 	}
@@ -327,7 +351,10 @@ sub _available_store {
 sub select_package_versions {
 	my ($p) = @_;
 
-# TODO: consider $target_release and $target_version
+	print "find $p->{name} for rel ", $target_release // '<u>', 
+		" ver ", $target_version // '<u>', "\n"
+		if $verbose;
+
 	my @v = sort { vacmp($a->{va}, $b->{va}) } values %{$p->{versions}};
 	$p->{v_sorted} = [ map $_->{version}, @v ];
 
@@ -335,12 +362,29 @@ sub select_package_versions {
 
 	my $target = $v[-1]{version};
 	my $i = $#v;
-	while($i >= 0 && $v[$i]{tag}[0] eq 'test') {
+	while($i >= 0 && $v[$i]{releases}[0] eq 'test') {
 		$i--;
 	}
 	$target = $v[$i]{version}
-		unless $i < 0 && $v[$i]{tag}[0] eq 'test';
-	$p->{v_upgrade} = $target;
+		unless $i < 0 && $v[$i]{releases}[0] eq 'test';
+	$p->{v_target} = $target;
+
+	if ($target_version) {
+		# newest version that matches $target_version
+		$p->{v_target} = (grep $_ =~ m{$target_version},
+			@{$p->{v_sorted}})[-1];
+# TODO: disallow downgrade unless explicitly selected
+		return;
+	}
+	if ($target_release) {
+		# newest version that has a release that matches $target_release
+		$p->{v_target} = (map $_->{version},
+			grep {
+				grep $_ =~ m{$target_release}, @{$_->{releases}}
+			} map $p->{versions}{$_}, @{$p->{v_sorted}})[-1];
+# TODO: disallow downgrade unless explicitly selected
+		return;
+	}
 }
 
 sub v2va {
@@ -376,6 +420,12 @@ sub vacmp {
 	} else {
 		return -1;
 	}
+}
+
+sub glob2re {
+	my ($re) = @_;
+	$re = glob_to_regex($re);
+	return qr{$re};
 }
 
 sub mkdir_p {
