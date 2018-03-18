@@ -10,6 +10,8 @@ use Text::Glob qw(glob_to_regex);
 use POSIX qw(uname);
 use Data::Dumper;
 
+# TODO: link last-cache to /var/cache/cygapt??
+
 use constant {
 	SETUP => "/etc/setup/setup.rc",
 	INSTALLED => "/etc/setup/installed.db",
@@ -18,7 +20,8 @@ use constant {
 };
 my (%setup, %package);
 
-my ($installed, $upgradable, $allversions, $yes, $purge, $verbose);
+my ($installed, $upgradable, $allversions, $downgrades, $yes,
+	$downloadonly, $purge, $dryrun, $verbose);
 our ($target_release, $target_version);
 my $root = '';
 GetOptions(
@@ -26,8 +29,11 @@ GetOptions(
 	"u|upgradable|upgradeable" => \$upgradable,
 	"a|all-versions" => \$allversions,
 	"t|target=s"	=> \$target_release,
+	"downgrades|allow-downgrades" => \$downgrades,
 	"y|yes"		=> \$yes,
+	"d|download-only" => \$downloadonly,
 	"purge"		=> \$purge,
+	"s|simulate|n|dry-run" => \$dryrun,
 	"v|verbose"	=> \$verbose,
 	"h|help"	=> sub { usage() },
 	"root=s"	=> \$root,
@@ -131,18 +137,24 @@ sub list {
 		print Dumper($p)
 			if $verbose;
 
+		my $u_t;
+		$u_t =  $p->{versions}{$p->{v_target}}{version_idx}
+			< $p->{versions}{$p->{v_installed}}{version_idx}
+			? 'upgradable' : 'downgradable'
+			if $p->{v_target} && $p->{v_installed};
+
 		for my $v ($allversions
-			? map $p->{versions}{$_}, reverse @{$p->{v_sorted}}
+			? @{$p->{versions_sorted}}
 			: $p->{versions}{$p->{v_target}}) {
 			my @t;
 			push @t, 'installed'
 				if $v->{installed};
-# TODO: change "upgradable" to "downgradable" when needed?
-			push @t, "upgradable from: $p->{v_installed}"
+
+			push @t, "$u_t from: $p->{v_installed}"
 				if $p->{v_installed} && ! $v->{installed}
 				&& $p->{v_target}
 				&& $v->{version} eq $p->{v_target};
-			push @t, "upgradable to: $p->{v_target}"
+			push @t, "$u_t to: $p->{v_target}"
 				if $v->{installed}
 				&& $p->{v_target}
 				&& $v->{version} ne $p->{v_target};
@@ -359,36 +371,41 @@ sub select_package_versions {
 		" ver ", $target_version // '<u>', "\n"
 		if $verbose;
 
-	my @v = sort { vacmp($a->{va}, $b->{va}) } values %{$p->{versions}};
-	$p->{v_sorted} = [ map $_->{version}, @v ];
+	my @v = sort { vacmp($b->{va}, $a->{va}) } values %{$p->{versions}};
+	$p->{versions_sorted} = \@v;
+	for my $i (0..$#v) {
+		$v[$i]{version_idx} = $i;
+	}
 
-	$p->{v_latest} = $v[-1]{version};
+	$p->{v_latest} = $v[0]{version};
 
 	my $target = $v[-1]{version};
-	my $i = $#v;
-	while($i >= 0 && $v[$i]{releases}[0] eq 'test') {
-		$i--;
+	my $i = 0;
+	while($i < @v && $v[$i]{releases}[0] eq 'test') {
+		$i++;
 	}
 	$target = $v[$i]{version}
-		unless $i < 0 && $v[$i]{releases}[0] eq 'test';
+		unless $i > $#v && $v[$i]{releases}[0] eq 'test';
 	$p->{v_target} = $target;
 
+	$target = undef;
 	if ($target_version) {
 		# newest version that matches $target_version
-		$p->{v_target} = (grep $_ =~ m{$target_version},
-			@{$p->{v_sorted}})[-1];
-# TODO: disallow downgrade unless explicitly selected
-		return;
-	}
-	if ($target_release) {
+		$target = (grep m{$target_version}, map($_->{version}, @v))[0];
+	} elsif ($target_release) {
 		# newest version that has a release that matches $target_release
-		$p->{v_target} = (map $_->{version},
+		$target = (map $_->{version},
 			grep {
 				grep $_ =~ m{$target_release}, @{$_->{releases}}
-			} map $p->{versions}{$_}, @{$p->{v_sorted}})[-1];
-# TODO: disallow downgrade unless explicitly selected
-		return;
+			} @v)[0];
 	}
+	# only pick new target if it is newer, or we can downgrade (or no
+	# prior target)
+	$p->{v_target} = $target
+		if $target && ($downgrades
+			|| ! $p->{v_target}
+			|| $p->{versions}{$target}{version_idx} <
+				$p->{versions}{$p->{v_target}}{version_idx});
 }
 
 sub v2va {
