@@ -5,9 +5,11 @@ use warnings;
 use feature qw(:5.20);
 use Getopt::Long;
 use LWP;
+use Compress::Bzip2;
 use URI::Escape qw(uri_escape);
 use Text::Glob qw(glob_to_regex);
 use POSIX qw(uname);
+use Time::HiRes qw(time sleep);
 use Data::Dumper;
 
 # TODO: link last-cache to /var/cache/cygapt??
@@ -17,12 +19,14 @@ use constant {
 	INSTALLED => "/etc/setup/installed.db",
 	# not using the cache from setup.ini
 	CACHE => "/var/cache/cygapt",
+	VERSION => "0.2",
 };
 my (%setup, %package);
 
 my ($installed, $upgradable, $allversions, $downgrades, $yes,
 	$downloadonly, $purge, $dryrun, $verbose);
 our ($target_release, $target_version);
+my $debug = 0;
 my $root = '';
 GetOptions(
 	"i|installed"	=> \$installed,
@@ -35,6 +39,7 @@ GetOptions(
 	"purge"		=> \$purge,
 	"s|simulate|n|dry-run" => \$dryrun,
 	"v|verbose"	=> \$verbose,
+	"D|debug:+"	=> \$debug,
 	"h|help"	=> sub { usage() },
 	"root=s"	=> \$root,
 ) or usage("");
@@ -67,29 +72,54 @@ if ($cmd eq 'vcmp' && @ARGV == 2) {
 }
 
 get_setup();
-get_installed();
-get_available();
 
 if ($cmd eq 'list') {
-	print "Listing... Done\n";
+	$| = 1;
+	print "Listing... ";
+	get_installed();
+	get_available();
+	print "Done\n";
 	list(@ARGV);
 } elsif ($cmd eq 'show') {
-	show(@ARGV);
+	unless (@ARGV) {
+		print STDERR "E: No packages found\n";
+		exit 10;
+	}
+	get_installed();
+	get_available();
+	list({ show => 1 }, @ARGV);
+} elsif ($cmd eq 'update') {
+	if (@ARGV) {
+		print STDERR "E: The update command takes no arguments\n";
+		exit 10;
+	}
+	update();
 } elsif (1) {
 	print STDERR "E: Not implemented yet\n";
 	exit 10;
 } elsif ($cmd eq 'install') {
 } elsif ($cmd eq 'remove') {
-} elsif ($cmd eq 'update') {
 } elsif ($cmd eq 'upgrade') {
 } elsif ($cmd eq 'clean') {
+	if (@ARGV) {
+		print STDERR "E: The clean command takes no arguments\n";
+		exit 10;
+	}
+	clean();
 } elsif ($cmd eq 'autoremove') {
+	if (@ARGV) {
+		print STDERR "E: The autoremove command takes no arguments\n";
+		exit 10;
+	}
+	autoremove();
 }
 
 sub list {
+	my $opt = { };
+	$opt = shift @_
+		if @_ && ref $_[0] eq 'HASH';
 	my $idx;
-# TODO: also do show
-#
+
 	my (@re, @t_rel, @t_ver);
 	for (@_) {
 		print STDERR "W: only select target version or release: $_\n"
@@ -107,7 +137,7 @@ sub list {
 		$re = join('|', @re);
 		$re = qr/(?:$re)/;
 		print STDERR "Match: $re\n"
-			if $verbose;
+			if $debug;
 	}
 
 	for my $pack (sort keys %package) {
@@ -135,7 +165,7 @@ sub list {
 				|| $p->{v_installed} eq $p->{v_target});
 
 		print Dumper($p)
-			if $verbose;
+			if $debug > 1;
 
 		my $u_t;
 		$u_t =  $p->{versions}{$p->{v_target}}{version_idx}
@@ -159,6 +189,10 @@ sub list {
 				&& $p->{v_target}
 				&& $v->{version} ne $p->{v_target};
 
+# TODO: also do show
+			if ($opt->{show}) {
+print "Show\n";
+			}
 			print "$pack/", join(",", @{$v->{releases}}), " ",
 				$v->{version},
 				@t ? " [".join(",", @t)."]" : "",
@@ -167,6 +201,52 @@ sub list {
 
 		print "\n"
 			if $allversions;
+	}
+}
+
+sub update {
+	my $ua = get_user_agent();
+
+# TODO: create temporary setup file, start decompressions
+	my $url = $setup{last_mirror}[0].'/'.$setup{arch}.'/setup.bz2';
+	print "get $url\n"
+		if $debug;
+	my $req = HTTP::Request->new(GET => $url);
+
+	my $size = 0;
+	my $total_size;
+	my $res = $ua->request($req, sub {
+		local $| = 1;
+		state $last = 0;
+		my $res = $_[1];
+		$total_size = $res->header('Content-Length') // -1
+			unless defined $total_size;
+		$size += length($_[0]);
+
+		my $now = time;
+		return
+			unless $now - $last > 0.1;
+		$last = $now;
+
+		my $s;
+		unless ($size || $total_size) {
+			$s = 'Waiting for headers';
+		} elsif ($total_size > 0) {
+			$s = sprintf("1 setup.bz2 %s/%s %d%%",
+				size2t($size), size2t($total_size),
+				100 * $size / $total_size);
+		} else {
+			$s = "1 setup.bz2 ".size2t($size);
+		}
+		print "[$s]\r";
+	});
+
+# TODO: swap setup file
+	if ($res->is_success) {
+		print "Get:1 $setup{last_mirror}[0]\n";
+		$total_size = $res->header('Content-Length');
+	} else {
+		print $res->status_line, "\n";
 	}
 }
 
@@ -199,8 +279,20 @@ sub get_setup {
 		exit 10;
 	}
 
-	$setup{last_cache} = CACHE."/".uri_escape($setup{last_mirror}[0]);
+	$setup{cache_mirror} = CACHE."/".uri_escape($setup{last_mirror}[0]);
 	($setup{arch} = (uname)[4]) =~ s/^i6/x/;
+}
+
+sub get_user_agent {
+	my $ua = LWP::UserAgent->new(
+		agent => "cygapt/".VERSION
+	);
+	$ua->env_proxy;
+	$ua->proxy(['http', 'https', 'ftp']
+		=> "http://".$setup{net_proxy_host}[0]
+			.":".$setup{net_proxy_port}[0])
+		if @{$setup{net_proxy_host}} && @{$setup{net_proxy_port}};
+	return $ua;
 }
 
 sub get_installed {
@@ -257,7 +349,7 @@ sub get_installed {
 
 sub get_available {
 	my $fh;
-	my $setup_name = $root.join("/", $setup{last_cache},
+	my $setup_name = $root.join("/", $setup{cache_mirror},
 		$setup{arch}, "setup.ini");
 
 	unless (open $fh, '<', $setup_name) {
@@ -369,7 +461,7 @@ sub select_package_versions {
 
 	print "find $p->{name} for rel ", $target_release // '<u>', 
 		" ver ", $target_version // '<u>', "\n"
-		if $verbose;
+		if $debug;
 
 	my @v = sort { vacmp($b->{va}, $a->{va}) } values %{$p->{versions}};
 	$p->{versions_sorted} = \@v;
@@ -456,6 +548,24 @@ sub mkdir_p {
 	(my $up = $dir) =~ s{/[^/]*$}{};
 	mkdir_p($up);
 	mkdir $dir;
+}
+
+sub size2t {
+	my ($s) = @_;
+	state $fmt = [
+		[ "%d B", 1, ],
+		[ "%.1f kB", 1024, ],
+		[ "%d kB", 1024, ],
+		[ "%.1f MB", 1024 * 1024, ],
+		[ "%d MB", 1024 * 1024, ],
+	];
+
+	for my $i (0..$#$fmt) {
+		my $t = sprintf($fmt->[$i][0], $s / $fmt->[$i][1]);
+		return $t
+			unless length($t) > 7;
+	}
+	return sprintf($fmt->[-1][0], $s / $fmt->[-1][1]);
 }
 
 sub usage {
