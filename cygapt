@@ -606,12 +606,21 @@ sub size2t {
 		[ "%d MB", 1024 * 1024, ],
 	];
 
+	my $t;
 	for my $i (0..$#$fmt) {
-		my $t = sprintf($fmt->[$i][0], $s / $fmt->[$i][1]);
-		return $t
-			unless length($t) > 7;
+		my $t2 = sprintf($fmt->[$i][0], $s / $fmt->[$i][1]);
+		($t = $t2), last
+			unless length($t2) > 7;
 	}
-	return sprintf($fmt->[-1][0], $s / $fmt->[-1][1]);
+	$t //= sprintf($fmt->[-1][0], $s / $fmt->[-1][1]);
+
+	# thousands separator
+	$t =~ m{(\d+)};
+	my $n = $1;
+	my $n2 = reverse join(",", unpack("(A3)*", reverse $n));
+	$t =~ s{$n}{$n2};
+
+	return $t;
 }
 
 sub usage {
