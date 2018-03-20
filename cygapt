@@ -79,7 +79,8 @@ if ($cmd eq 'list') {
 	get_installed();
 	get_available();
 	print "Done\n";
-	list(@ARGV);
+	list({ upgradable => $upgradable, installed => $installed },
+		@ARGV);
 } elsif ($cmd eq 'show') {
 	unless (@ARGV) {
 		print STDERR "E: No packages found\n";
@@ -87,7 +88,8 @@ if ($cmd eq 'list') {
 	}
 	get_installed();
 	get_available();
-	list({ show => 1 }, @ARGV);
+	list({ show => 1, upgradable => $upgradable, installed => $installed },
+		@ARGV);
 } elsif ($cmd eq 'update') {
 	if (@ARGV) {
 		print STDERR "E: The update command takes no arguments\n";
@@ -140,6 +142,7 @@ sub list {
 			if $debug;
 	}
 
+	my $count = 0;
 	for my $pack (sort keys %package) {
 		next
 			if $re && $pack !~ $re;
@@ -152,14 +155,15 @@ sub list {
 		}
 
 		next
-			if $installed && ! $p->{v_installed};
+			if ($opt->{installed} || $opt->{upgradable})
+			&& ! $p->{v_installed};
 
 		select_package_versions($p);
 
 		# upgradable needs to be installed, and not the upgrade
 		# version
 		next
-			if $upgradable
+			if $opt->{upgradable}
 			&& (! $p->{v_installed}
 				|| ! $p->{v_target}
 				|| $p->{v_installed} eq $p->{v_target});
@@ -172,6 +176,10 @@ sub list {
 			< $p->{versions}{$p->{v_installed}}{version_idx}
 			? 'upgradable' : 'downgradable'
 			if $p->{v_target} && $p->{v_installed};
+
+		$count++;
+		next
+			if $opt->{count_only};
 
 		for my $v ($allversions
 			? @{$p->{versions_sorted}}
@@ -202,6 +210,8 @@ print "Show\n";
 		print "\n"
 			if $allversions;
 	}
+
+	return $count;
 }
 
 sub update {
@@ -214,11 +224,11 @@ sub update {
 		if $debug;
 	my $req = HTTP::Request->new(GET => $url);
 
-	my $setup_name = $root.join("/", $setup{cache_mirror},
-		$setup{arch}, "setup.ini");
+	my $setup_dir = $root.join("/", $setup{cache_mirror}, $setup{arch});
+	mkdir_p($setup_dir);
 	my $fh;
-	unless (open $fh, '>', "$setup_name.new") {
-		print STDERR "E: Could not write $setup_name.new: $!\n";
+	unless (open $fh, '>', "$setup_dir/setup.new") {
+		print STDERR "E: Could not write $setup_dir/setup.new: $!\n";
 		exit 10;
 	}
 	my ($bz, $bzstat) = bzinflateInit;
@@ -263,22 +273,26 @@ sub update {
 	my $end = time;
 
 	if ($res->is_success) {
-		rename("$setup_name.new", $setup_name);
-# TODO: swap setup file
+		rename("$setup_dir/setup.new", "$setup_dir/setup.ini");
 		print "Get:1 $setup{last_mirror}[0]\n";
 		printf "Fetched %s in %ds (%s/s)\n",
 			size2t($total_size), $end - $start,
 			size2t($total_size / ($end - $start));
+
 	} else {
 # TODO: what now?
 		print $res->status_line, "\n";
-		unlink("$setup_name.new");
+		unlink("$setup_dir/setup.new");
 	}
 
 	print "Reading state information... ";
 	get_installed();
 	get_available();
+	my $u = list({ count_only => 1, upgradable => 1});
 	print "Done\n";
+	print "$u packages can be upgraded. ",
+		"Run 'cygapt list --upgradable' to see them.\n"
+		if $u;
 }
 
 sub get_setup {
@@ -322,7 +336,8 @@ sub get_user_agent {
 	$ua->proxy(['http', 'https', 'ftp']
 		=> "http://".$setup{net_proxy_host}[0]
 			.":".$setup{net_proxy_port}[0])
-		if @{$setup{net_proxy_host}} && @{$setup{net_proxy_port}};
+		if exists $setup{net_proxy_host}
+		&& exists $setup{net_proxy_port};
 	return $ua;
 }
 
