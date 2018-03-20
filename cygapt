@@ -205,6 +205,7 @@ print "Show\n";
 }
 
 sub update {
+	local $| = 1;
 	my $ua = get_user_agent();
 
 # TODO: create temporary setup file, start decompressions
@@ -213,10 +214,23 @@ sub update {
 		if $debug;
 	my $req = HTTP::Request->new(GET => $url);
 
+	my $setup_name = $root.join("/", $setup{cache_mirror},
+		$setup{arch}, "setup.ini");
+	my $fh;
+	unless (open $fh, '>', "$setup_name.new") {
+		print STDERR "E: Could not write $setup_name.new: $!\n";
+		exit 10;
+	}
+	my ($bz, $bzstat) = bzinflateInit;
+
+	my $data;
 	my $size = 0;
 	my $total_size;
+	my $start = time;
 	my $res = $ua->request($req, sub {
-		local $| = 1;
+		($data, $bzstat) = $bz->bzinflate($_[0]);
+		print $fh $data;
+
 		state $last = 0;
 		my $res = $_[1];
 		$total_size = $res->header('Content-Length') // -1
@@ -241,13 +255,30 @@ sub update {
 		print "[$s]\r";
 	});
 
-# TODO: swap setup file
+	($data, $bzstat) = $bz->bzflush;
+	print $fh $data // '';
+	($data, $bzstat) = $bz->bzclose;
+	print $fh $data // '';
+	close($fh);
+	my $end = time;
+
 	if ($res->is_success) {
+		rename("$setup_name.new", $setup_name);
+# TODO: swap setup file
 		print "Get:1 $setup{last_mirror}[0]\n";
-		$total_size = $res->header('Content-Length');
+		printf "Fetched %s in %ds (%s/s)\n",
+			size2t($total_size), $end - $start,
+			size2t($total_size / ($end - $start));
 	} else {
+# TODO: what now?
 		print $res->status_line, "\n";
+		unlink("$setup_name.new");
 	}
+
+	print "Reading state information... ";
+	get_installed();
+	get_available();
+	print "Done\n";
 }
 
 sub get_setup {
