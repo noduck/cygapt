@@ -3,7 +3,7 @@
 use strict;
 use warnings;
 use feature qw(:5.20);
-use Getopt::Long;
+use Getopt::Long qw(:config bundling no_ignore_case);
 use LWP;
 use Compress::Bzip2;
 use URI::Escape qw(uri_escape);
@@ -22,10 +22,11 @@ use constant {
 	VERSION => "0.2",
 };
 my (%setup, %package);
+# fields in order (not showing install and source)
+my @field = (qw(sdesc ldesc category requires version depends2));
 
-my ($installed, $upgradable, $allversions, $downgrades, $yes,
-	$downloadonly, $purge, $dryrun, $verbose);
-our ($target_release, $target_version);
+my ($installed, $upgradable, $allversions, $target_release, $downgrades, $yes,
+	$downloadonly, $purge, $dryrun, $recurse, $fullrecurse, $verbose);
 my $debug = 0;
 my $root = '';
 GetOptions(
@@ -38,6 +39,8 @@ GetOptions(
 	"d|download-only" => \$downloadonly,
 	"purge"		=> \$purge,
 	"s|simulate|n|dry-run" => \$dryrun,
+	"r|recurse"	=> \$recurse,
+	"full-recurse"	=> \$fullrecurse,
 	"v|verbose"	=> \$verbose,
 	"D|debug:+"	=> \$debug,
 	"h|help"	=> sub { usage() },
@@ -66,7 +69,7 @@ if ($cmd eq 'vcmp' && @ARGV == 2) {
 		" $ARGV[1]\n";
 	exit 0;
 } elsif ($cmd !~ /^(?:list|show|install|remove|
-	update|upgrade|clean|autoremove)$/x) {
+	update|upgrade|clean|autoremove|depends|rdepends)$/x) {
 	print STDERR "E: Invalid command $cmd\n";
 	exit 10;
 }
@@ -79,8 +82,10 @@ if ($cmd eq 'list') {
 	get_installed();
 	get_available();
 	print "Done\n";
-	list({ upgradable => $upgradable, installed => $installed },
+	list({ upgradable => $upgradable, installed => $installed,
+		all => $allversions },
 		@ARGV);
+	exit 0;
 } elsif ($cmd eq 'show') {
 	unless (@ARGV) {
 		print STDERR "E: No packages found\n";
@@ -88,77 +93,102 @@ if ($cmd eq 'list') {
 	}
 	get_installed();
 	get_available();
-	list({ show => 1, upgradable => $upgradable, installed => $installed },
+	list({ show => 1, upgradable => $upgradable, installed => $installed,
+		all => $allversions},
 		@ARGV);
+	exit 0;
 } elsif ($cmd eq 'update') {
 	if (@ARGV) {
 		print STDERR "E: The update command takes no arguments\n";
 		exit 10;
 	}
 	update();
-} elsif (1) {
+	exit 0;
+} elsif ($cmd eq 'install') {
+	get_installed();
+	get_available();
+	my $opt = { };
+	if (depends($opt, @ARGV)) {
+		my $u = $opt->{uninstalled_level};
+		print "install: ",
+			join(", ", sort { $u->{$b} <=> $u->{$a} } keys %$u),
+			"\n";
+	}
 	print STDERR "E: Not implemented yet\n";
 	exit 10;
-} elsif ($cmd eq 'install') {
 } elsif ($cmd eq 'remove') {
+	get_installed();
+	get_available();
+	my $opt = { print => 0 };
+	list_rdepends($opt, @ARGV);
+	my $u = $opt->{installed_level};
+	print "remove: ",
+		join(", ", sort { $u->{$b} <=> $u->{$a} } keys %$u),
+		"\n";
+	print STDERR "E: Not implemented yet\n";
+	exit 10;
 } elsif ($cmd eq 'upgrade') {
+	print STDERR "E: Not implemented yet\n";
+	exit 10;
 } elsif ($cmd eq 'clean') {
 	if (@ARGV) {
 		print STDERR "E: The clean command takes no arguments\n";
 		exit 10;
 	}
+	print STDERR "E: Not implemented yet\n";
+	exit 10;
 	clean();
+	exit 0;
 } elsif ($cmd eq 'autoremove') {
 	if (@ARGV) {
 		print STDERR "E: The autoremove command takes no arguments\n";
 		exit 10;
 	}
+	print STDERR "E: Not implemented yet\n";
+	exit 10;
 	autoremove();
+	exit 0;
+} elsif ($cmd eq 'depends') {
+	unless (@ARGV) {
+		print STDERR "E: No packages found\n";
+		exit 10;
+	}
+	get_installed();
+	get_available();
+	list_depends(@ARGV);
+	exit 0;
+} elsif ($cmd eq 'rdepends') {
+	unless (@ARGV) {
+		print STDERR "E: No packages found\n";
+		exit 10;
+	}
+	get_installed();
+	get_available();
+	list_rdepends(@ARGV);
+	exit 0;
 }
+exit 10;
 
 sub list {
 	my $opt = { };
 	$opt = shift @_
 		if @_ && ref $_[0] eq 'HASH';
-	my $idx;
 
-	my (@re, @t_rel, @t_ver);
-	for (@_) {
-		print STDERR "W: only select target version or release: $_\n"
-			if m{/} && m{=};
-
- 		push @t_rel, s{/(\S+)}{} ? glob2re($1) : $target_release;
-		push @t_ver, s{=(\S+)}{} ? glob2re($1) : $target_version;
-
-		push @re, glob2re($_)."(?{ \$idx = ".scalar(@re)." })";
-	}
-
-	my $re;
-	if (@re) {
-		use re 'eval';
-		$re = join('|', @re);
-		$re = qr/(?:$re)/;
-		print STDERR "Match: $re\n"
-			if $debug;
-	}
+	my ($re, $t_rels, $t_vers) = argv2re(@_);
 
 	my $count = 0;
 	for my $pack (sort keys %package) {
+		$a = undef;
 		next
 			if $re && $pack !~ $re;
 		my $p = $package{$pack};
-		local ($target_release, $target_version)
-			= ($target_release, $target_version);
-		if (defined $idx) {
-			$target_release = $t_rel[$idx];
-			$target_version = $t_ver[$idx];
-		}
-
 		next
 			if ($opt->{installed} || $opt->{upgradable})
 			&& ! $p->{v_installed};
 
-		select_package_versions($p);
+		select_package_versions($p,
+			defined $a ? $t_rels->[$a] : $target_release,
+			defined $a ? $t_vers->[$a] : undef);
 
 		# upgradable needs to be installed, and not the upgrade
 		# version
@@ -171,44 +201,71 @@ sub list {
 		print Dumper($p)
 			if $debug > 1;
 
-		my $u_t;
-		$u_t =  $p->{versions}{$p->{v_target}}{version_idx}
-			< $p->{versions}{$p->{v_installed}}{version_idx}
-			? 'upgradable' : 'downgradable'
-			if $p->{v_target} && $p->{v_installed};
-
 		$count++;
 		next
 			if $opt->{count_only};
 
-		for my $v ($allversions
+		my $u_t;
+		if ($opt->{show}) {
+			print "@ $pack\n";
+			for my $f (@field) {
+				next
+					unless exists $p->{"tag_$f"};
+				print "$f: ", $p->{"tag_$f"}, "\n";
+			}
+		} elsif ($p->{v_target} && $p->{v_installed}) {
+			# upgrade or downgrade?
+			$u_t =  $p->{versions}{$p->{v_target}}{version_idx}
+				< $p->{versions}{$p->{v_installed}}{version_idx}
+				? 'upgradable' : 'downgradable'
+		}
+
+		my $first = 1;
+		for my $v ($opt->{all}
 			? @{$p->{versions_sorted}}
 			: $p->{versions}{$p->{v_target}}) {
+			if ($opt->{show}) {
+				print "[", join(",", @{$v->{releases}}), "]\n"
+					unless $first;
+
+				for my $f (@field) {
+					next
+						unless exists $v->{"tag_$f"};
+					print "$f: ", $v->{"tag_$f"}, "\n";
+				}
+
+				print "status: ",
+					$p->{picked} ? "manually installed"
+						: "system installed",
+					"\n"
+					if $opt->{all} && $v->{installed}
+					|| ! $opt->{all} && $p->{v_installed};
+
+				$first = undef;
+				next;
+			}
+
 			my @t;
 			push @t, 'installed'
-				if $v->{installed};
+				if $v->{installed} && ! $opt->{show};
 
 			push @t, "$u_t from: $p->{v_installed}"
 				if $p->{v_installed} && ! $v->{installed}
 				&& $p->{v_target}
-				&& $v->{version} eq $p->{v_target};
+				&& $v->{tag_version} eq $p->{v_target};
 			push @t, "$u_t to: $p->{v_target}"
 				if $v->{installed}
 				&& $p->{v_target}
-				&& $v->{version} ne $p->{v_target};
+				&& $v->{tag_version} ne $p->{v_target};
 
-# TODO: also do show
-			if ($opt->{show}) {
-print "Show\n";
-			}
-			print "$pack/", join(",", @{$v->{releases}}), " ",
-				$v->{version},
+			print "$pack/", join(",", @{$v->{releases}}),
+				" ", $v->{tag_version},
 				@t ? " [".join(",", @t)."]" : "",
 				"\n";
 		}
 
 		print "\n"
-			if $allversions;
+			if $opt->{all} || $opt->{show};
 	}
 
 	return $count;
@@ -218,7 +275,6 @@ sub update {
 	local $| = 1;
 	my $ua = get_user_agent();
 
-# TODO: create temporary setup file, start decompressions
 	my $url = $setup{last_mirror}[0].'/'.$setup{arch}.'/setup.bz2';
 	print "get $url\n"
 		if $debug;
@@ -280,9 +336,11 @@ sub update {
 			size2t($total_size / ($end - $start));
 
 	} else {
-# TODO: what now?
-		print $res->status_line, "\n";
+		print "Err:1 $setup{last_mirror}[0]\n  ",
+			$res->message, "\n";
 		unlink("$setup_dir/setup.new");
+		print STDERR "W: Failed to fetch $url ",
+			$res->message, "\n";
 	}
 
 	print "Reading state information... ";
@@ -293,6 +351,144 @@ sub update {
 	print "$u packages can be upgraded. ",
 		"Run 'cygapt list --upgradable' to see them.\n"
 		if $u;
+}
+
+sub list_depends {
+	my $opt = { };
+	$opt = { %{shift @_} }
+		if @_ && ref $_[0] eq 'HASH';
+	$opt->{fullrecurse} = $fullrecurse ? ~0 : 1;
+	$opt->{recurse} = $recurse ? ~0 : 1;
+	$opt->{print} = 1;
+
+	my ($re, $t_rels, $t_vers) = argv2re(@_);
+
+	for my $pack (sort keys %package) {
+		$a = undef;
+		next
+			if $re && $pack !~ $re;
+		my $p = $package{$pack};
+
+		$opt->{t_rel} = $t_rels->[$a];
+		$opt->{t_ver} = $t_vers->[$a];
+
+		depends($opt, $pack);
+	}
+}
+
+sub depends {
+	my ($opt, $pack) = @_;
+	# defaults to collecting all uninstalled
+	$opt->{level} //= 0;
+	$opt->{recurse} //= ~0;
+	$opt->{fullrecurse} //= 0;
+	my $rc = 1;
+
+	return $rc
+		if $opt->{depends}{$pack};
+	unless (exists $package{$pack}) {
+		print "W: no installable version for $pack\n";
+		return 0;
+	}
+	my $p = $package{$pack};
+	$opt->{depends}{$pack}++;
+
+	select_package_versions($p, $opt->{t_rel}, $opt->{t_ver});
+	print '  ' x $opt->{level}, $pack,
+		$p->{v_installed} ? " [installed]" : "", "\n"
+		if $opt->{print};
+	return $rc
+		if ($opt->{recurse} <= 0 || $p->{v_installed})
+		&& $opt->{fullrecurse} <= 0;
+	$opt->{uninstalled_level}{$pack} = $opt->{level}
+		unless $p->{v_installed}
+		|| (exists $opt->{uninstalled_level}{$pack}
+			&& $opt->{uninstalled_level}{$pack} > $opt->{level});
+	unless ($p->{v_target}) {
+		print "W: no installable version for $pack\n";
+		return 0;
+	}
+
+	my $v = $p->{versions}{$p->{v_target}};
+	my @dep;
+	if (exists $v->{tag_depends2}) {
+		@dep = split /,\s*/, $v->{tag_depends2};
+	} elsif (exists $p->{tag_requires}) {
+		@dep = split /\s+/, $p->{tag_requires};
+	}
+
+	my %opt2 = (
+		%$opt,
+		level => $opt->{level}+1,
+		recurse => $opt->{recurse}-1,
+		fullrecurse => $opt->{fullrecurse}-1,
+		t_ver => undef
+	);
+	for my $d (@dep) {
+		$rc = 0
+			unless depends(\%opt2, $d);
+	}
+
+	return $rc;
+}
+
+sub list_rdepends {
+	my $opt = { };
+	$opt = shift @_
+		if @_ && ref $_[0] eq 'HASH';
+	$opt->{print} //= 1;
+	$opt->{level} //= 0;
+
+	my ($re) = argv2re(@_);
+	for my $pack (sort keys %package) {
+		next
+			unless $pack =~ m{$re}
+			&& ! exists $opt->{rdepends}{$pack};
+		my $p = $package{$pack};
+		next
+			unless $p->{v_installed};
+
+		print $pack, "\n"
+			if $opt->{print};
+		$opt->{installed_level}{$pack} = $opt->{level}
+			unless exists $opt->{installed_level}{$pack}
+			&& $opt->{installed_level}{$pack} > $opt->{level};
+		rdepends({ %$opt, level => $opt->{level}+1 }, $pack);
+	}
+}
+
+sub rdepends {
+	my ($opt, $dep) = @_;
+	$opt->{level} //= 0;
+
+	for my $pack (sort keys %package) {
+		next
+			if exists $opt->{installed_level}{$pack};
+		my $p = $package{$pack};
+		next
+			unless $p->{v_installed};
+
+		my $v = $p->{versions}{$p->{v_installed}};
+		unless (exists $v->{depends}) {
+			my @dep;
+			if (exists $v->{tag_depends2}) {
+				@dep = split /,\s*/, $v->{tag_depends2};
+			} elsif (exists $p->{tag_requires}) {
+				@dep = split /\s+/, $p->{tag_requires};
+			}
+			$v->{depends} = \@dep;
+		}
+
+		next
+			unless grep $_ eq $dep, @{$v->{depends}};
+		print '  ' x $opt->{level}, "$pack\n"
+			if $opt->{print};
+		$opt->{installed_level}{$pack} = $opt->{level}
+			unless exists $opt->{installed_level}{pack}
+			&& $opt->{installed_level}{pack} > $opt->{level};
+
+		rdepends({ %$opt, level => $opt->{level}+1 }, $pack);
+	}
 }
 
 sub get_setup {
@@ -380,13 +576,13 @@ sub get_installed {
 			$v = $p->{versions}{$version};
 		} else {
 			$v = $p->{versions}{$version} = {
-				version => $version,
+				tag_version => $version,
 				va => v2va($version),
 			};
 		}
 
 		$v->{installed} = 1;
-		$v->{version} = $version;
+		$v->{tag_version} = $version;
 		push @{$v->{releases}}, 'now';
 	}
 
@@ -450,7 +646,7 @@ sub get_available {
 			if $q & 1;
 
 		#print "store key $key\n";
-		$vals->{$key} = $val;
+		$vals->{"tag_$key"} = $val;
 		$key = undef;
 	}
 
@@ -460,12 +656,12 @@ sub get_available {
 sub _available_store {
 	my ($pack, $rel, $vals) = @_;
 
-	unless (exists $vals->{version}) { # && exists $vals->{sdesc}) {
+	unless (exists $vals->{tag_version}) { # && exists $vals->{sdesc}) {
 		print STDERR "W: package $pack doesn't have ",
 			"'version' tag\n";
 		return;
 	}
-	my $version = $vals->{version};
+	my $version = $vals->{tag_version};
 
 	my $p;
 	if (exists $package{$pack}) {
@@ -477,7 +673,8 @@ sub _available_store {
 		};
 	}
 	
-	for my $k (qw(sdesc ldesc category message)) {
+	for my $k (qw(tag_sdesc tag_ldesc tag_category tag_message
+		tag_requires)) {
 		next
 			unless exists $vals->{$k};
 		my $t = $vals->{$k};
@@ -503,10 +700,10 @@ sub _available_store {
 }
 
 sub select_package_versions {
-	my ($p) = @_;
+	my ($p, $t_rel, $t_ver) = @_;
 
-	print "find $p->{name} for rel ", $target_release // '<u>', 
-		" ver ", $target_version // '<u>', "\n"
+	print "find $p->{name} for rel ", $t_rel // '<u>', 
+		" ver ", $t_ver // '<u>', "\n"
 		if $debug;
 
 	my @v = sort { vacmp($b->{va}, $a->{va}) } values %{$p->{versions}};
@@ -515,26 +712,27 @@ sub select_package_versions {
 		$v[$i]{version_idx} = $i;
 	}
 
-	$p->{v_latest} = $v[0]{version};
+	$p->{v_latest} = $v[0]{tag_version};
 
-	my $target = $v[-1]{version};
+	my $target = $v[-1]{tag_version};
 	my $i = 0;
 	while($i < @v && $v[$i]{releases}[0] eq 'test') {
 		$i++;
 	}
-	$target = $v[$i]{version}
+	$target = $v[$i]{tag_version}
 		unless $i > $#v && $v[$i]{releases}[0] eq 'test';
 	$p->{v_target} = $target;
 
 	$target = undef;
-	if ($target_version) {
-		# newest version that matches $target_version
-		$target = (grep m{$target_version}, map($_->{version}, @v))[0];
-	} elsif ($target_release) {
-		# newest version that has a release that matches $target_release
-		$target = (map $_->{version},
+	if ($t_ver) {
+		# newest version that matches $t_ver
+		$target = (grep m{$t_ver},
+			map($_->{tag_version}, @v))[0];
+	} elsif ($t_rel) {
+		# newest version that has a release that matches $t_rel
+		$target = (map $_->{tag_version},
 			grep {
-				grep $_ =~ m{$target_release}, @{$_->{releases}}
+				grep $_ =~ m{$t_rel}, @{$_->{releases}}
 			} @v)[0];
 	}
 	# only pick new target if it is newer, or we can downgrade (or no
@@ -579,6 +777,38 @@ sub vacmp {
 	} else {
 		return -1;
 	}
+}
+
+sub argv2re {
+	return (undef, [], [])
+		unless @_;
+
+	my $opt = @_ && ref $_[0] eq 'HASH' ? shift @_ : { };
+	my (@re, @t_rel, @t_ver);
+	for (@_) {
+		if (! $opt->{installed}) {
+		} elsif (m{[=/](\S+)}) {
+			print STDERR "E: Can only match installed ",
+				"version: $_\n";
+			exit 10;
+		}
+		print STDERR "W: Only select target version or release: $_\n"
+			if m{/} && m{=};
+
+ 		push @t_rel, s{/(\S+)$}{} ? glob2re($1) : $target_release;
+		push @t_ver, s{=(\S+)$}{} ? glob2re($1) : undef;
+
+		push @re, glob2re($_)."(?{ \$a = ".scalar(@re)." })";
+	}
+
+	my $re;
+	use re 'eval';
+	$re = join('|', @re);
+	$re = qr/(?:$re)/;
+	print STDERR "Match: $re\n"
+		if $debug;
+
+	return ($re, \@t_rel, \@t_ver);
 }
 
 sub glob2re {
