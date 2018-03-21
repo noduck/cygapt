@@ -110,10 +110,17 @@ if ($cmd eq 'list') {
 	get_available();
 	my $opt = { };
 	if (depends($opt, @ARGV)) {
-		my $u = $opt->{uninstalled_level};
-		print "install: ",
-			join(", ", sort { $u->{$b} <=> $u->{$a} } keys %$u),
-			"\n";
+		my $uh = $opt->{uninstalled_level};
+		my $u = [ sort { $uh->{$b} <=> $uh->{$a} } keys %$uh ];
+	if (0) {
+		print "The following additional packages will be installed:\n";
+		list_array(sort @$u);
+	}
+	if (@$u) {
+		print "The following NEW packages will be installed:\n";
+		list_array(sort @$u);
+	}
+	print "Do you want to continue? [Y/n] \n";
 	}
 	print STDERR "E: Not implemented yet\n";
 	exit 10;
@@ -136,21 +143,24 @@ if ($cmd eq 'list') {
 	print "Reading state information... ";
 	get_installed();
 	print "Done\n";
-	print "Calculating upgrade... ";
 	my ($upgrades, $new_deps) = upgradable(@ARGV);
-	print "Done\n";
+	print "Calculating upgrade... Done\n";
 
 	if (@$new_deps) {
-		print "The following NEW packages will be installed:\n";
+		print "The following additional packages will be installed:\n";
 		list_array(sort @$new_deps);
 	}
 	if (@$upgrades) {
 		print "The following packages will be upgraded:\n";
 		list_array(sort @$upgrades);
 	}
-	
-	print STDERR "E: Not implemented yet\n";
-	exit 10;
+	if (@$new_deps || @$upgrades) {
+		print "Do you want to continue? [Y/n] \n";
+		
+		print STDERR "E: Not implemented yet\n";
+		exit 10;
+	}
+	print "0 upgraded, 0 newly installed and 0 to remove.\n";
 } elsif ($cmd eq 'clean') {
 	if (@ARGV) {
 		print STDERR "E: The clean command takes no arguments\n";
@@ -188,7 +198,7 @@ if ($cmd eq 'list') {
 	list_rdepends(@ARGV);
 	exit 0;
 }
-exit 10;
+exit 0;
 
 sub list {
 	my $opt = { };
@@ -391,15 +401,23 @@ sub upgradable {
 			defined $a ? $t_rels->[$a] : $target_release,
 			defined $a ? $t_vers->[$a] : undef);
 
-		next
-			unless $p->{v_target}
-			&& $p->{v_target} ne $p->{v_installed};
+		if (! $p->{v_target}) {
+			print STDERR "W: no installable version for $pack\n"
+				if $re;
+			next;
+		} elsif ($p->{v_target} eq $p->{v_installed}) {
+			print "$pack is already the newest ",
+				"version ($p->{v_installed})\n"
+				if $re;
+			next;
+		}
 
 		push @upgrade, $pack;
 	}
 
 	my %opt;
-	depends(\%opt, @upgrade);
+	depends(\%opt, @upgrade)
+		if @upgrade;
 
 	my $u = $opt{uninstalled_level};
 	return (\@upgrade, [ sort { $u->{$b} <=> $u->{$a} } keys %$u ]);
@@ -439,7 +457,7 @@ sub depends {
 	return $rc
 		if $opt->{depends}{$pack};
 	unless (exists $package{$pack}) {
-		print "W: no installable version for $pack\n";
+		print STDERR "W: no installable version for $pack\n";
 		return 0;
 	}
 	my $p = $package{$pack};
@@ -457,7 +475,7 @@ sub depends {
 		|| (exists $opt->{uninstalled_level}{$pack}
 			&& $opt->{uninstalled_level}{$pack} > $opt->{level});
 	unless ($p->{v_target}) {
-		print "W: no installable version for $pack\n";
+		print STDERR "W: no installable version for $pack\n";
 		return 0;
 	}
 
