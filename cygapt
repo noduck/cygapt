@@ -528,12 +528,12 @@ sub get_user_agent {
 	my $ua = LWP::UserAgent->new(
 		agent => "cygapt/".VERSION
 	);
-	$ua->env_proxy;
 	$ua->proxy(['http', 'https', 'ftp']
 		=> "http://".$setup{net_proxy_host}[0]
 			.":".$setup{net_proxy_port}[0])
 		if exists $setup{net_proxy_host}
 		&& exists $setup{net_proxy_port};
+	$ua->env_proxy;
 	return $ua;
 }
 
