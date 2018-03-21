@@ -10,6 +10,7 @@ use URI::Escape qw(uri_escape);
 use Text::Glob qw(glob_to_regex);
 use POSIX qw(uname);
 use Time::HiRes qw(time sleep);
+use Term::ReadKey;
 use Data::Dumper;
 
 # TODO: link last-cache to /var/cache/cygapt??
@@ -128,6 +129,26 @@ if ($cmd eq 'list') {
 	print STDERR "E: Not implemented yet\n";
 	exit 10;
 } elsif ($cmd eq 'upgrade') {
+	$| = 1;
+	print "Reading package lists... ";
+	get_available();
+	print "Done\n";
+	print "Reading state information... ";
+	get_installed();
+	print "Done\n";
+	print "Calculating upgrade... ";
+	my ($upgrades, $new_deps) = upgradable(@ARGV);
+	print "Done\n";
+
+	if (@$new_deps) {
+		print "The following NEW packages will be installed:\n";
+		list_array(sort @$new_deps);
+	}
+	if (@$upgrades) {
+		print "The following packages will be upgraded:\n";
+		list_array(sort @$upgrades);
+	}
+	
 	print STDERR "E: Not implemented yet\n";
 	exit 10;
 } elsif ($cmd eq 'clean') {
@@ -353,6 +374,37 @@ sub update {
 		if $u;
 }
 
+sub upgradable {
+	my ($re, $t_rels, $t_vers) = argv2re(@_);
+
+	my @upgrade;
+	for my $pack (keys %package) {
+		my $p = $package{$pack};
+		next
+			unless $p->{v_installed};
+
+		$a = undef;
+		next
+			if $re && $pack !~ $re;
+
+		select_package_versions($p,
+			defined $a ? $t_rels->[$a] : $target_release,
+			defined $a ? $t_vers->[$a] : undef);
+
+		next
+			unless $p->{v_target}
+			&& $p->{v_target} ne $p->{v_installed};
+
+		push @upgrade, $pack;
+	}
+
+	my %opt;
+	depends(\%opt, @upgrade);
+
+	my $u = $opt{uninstalled_level};
+	return (\@upgrade, [ sort { $u->{$b} <=> $u->{$a} } keys %$u ]);
+}
+
 sub list_depends {
 	my $opt = { };
 	$opt = { %{shift @_} }
@@ -524,6 +576,24 @@ sub get_setup {
 	($setup{arch} = (uname)[4]) =~ s/^i6/x/;
 }
 
+sub list_array {
+	my ($width) = GetTerminalSize();
+	$width--;
+
+	print " ";
+	my $w = 1;
+	for my $a (@_) {
+		if ($w + length($a) >= $width) {
+			print "\n  $a";
+			$w = 2 + length($a);
+		} else {
+			print " $a";
+			$w += 1 + length($a);
+		}
+	}
+	print "\n";
+}
+
 sub get_user_agent {
 	my $ua = LWP::UserAgent->new(
 		agent => "cygapt/".VERSION
@@ -617,6 +687,7 @@ sub get_available {
 			$pack = $1;
 			$rel = 'current';
 			#print "package $pack\n";
+			$vals->{base} = $setup{last_mirror}[0];
 			next;
 		} elsif (/^\[(\S+)\]/) {
 			# store
