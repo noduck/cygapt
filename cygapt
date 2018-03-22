@@ -106,35 +106,39 @@ if ($cmd eq 'list') {
 	update();
 	exit 0;
 } elsif ($cmd eq 'install') {
-	get_installed();
+	$| = 1;
+	print "Reading package lists... ";
 	get_available();
+	print "Done\n";
+	print "Reading state information... ";
+	get_installed();
+	print "Done\n";
+
 	my $opt = { };
 	if (depends($opt, @ARGV)) {
 		my $uh = $opt->{uninstalled_level};
 		my $u = [ sort { $uh->{$b} <=> $uh->{$a} } keys %$uh ];
-	if (0) {
-		print "The following additional packages will be installed:\n";
-		list_array(sort @$u);
+
+		make_changes({
+			installs => [ ],
+			install_deps => $u,
+		});
 	}
-	if (@$u) {
-		print "The following NEW packages will be installed:\n";
-		list_array(sort @$u);
-	}
-	print "Do you want to continue? [Y/n] \n";
-	}
-	print STDERR "E: Not implemented yet\n";
-	exit 10;
 } elsif ($cmd eq 'remove') {
-	get_installed();
+	$| = 1;
+	print "Reading package lists... ";
 	get_available();
+	print "Done\n";
+	print "Reading state information... ";
+	get_installed();
+	print "Done\n";
+
 	my $opt = { print => 0 };
 	list_rdepends($opt, @ARGV);
 	my $u = $opt->{installed_level};
-	print "remove: ",
-		join(", ", sort { $u->{$b} <=> $u->{$a} } keys %$u),
-		"\n";
-	print STDERR "E: Not implemented yet\n";
-	exit 10;
+	make_changes({
+		removes => [ sort { $u->{$b} <=> $u->{$a} } keys %$u ],
+	});
 } elsif ($cmd eq 'upgrade') {
 	$| = 1;
 	print "Reading package lists... ";
@@ -146,21 +150,10 @@ if ($cmd eq 'list') {
 	my ($upgrades, $new_deps) = upgradable(@ARGV);
 	print "Calculating upgrade... Done\n";
 
-	if (@$new_deps) {
-		print "The following additional packages will be installed:\n";
-		list_array(sort @$new_deps);
-	}
-	if (@$upgrades) {
-		print "The following packages will be upgraded:\n";
-		list_array(sort @$upgrades);
-	}
-	if (@$new_deps || @$upgrades) {
-		print "Do you want to continue? [Y/n] \n";
-		
-		print STDERR "E: Not implemented yet\n";
-		exit 10;
-	}
-	print "0 upgraded, 0 newly installed and 0 to remove.\n";
+	make_changes({
+		upgrade_deps => $new_deps,
+		upgrades => $upgrades,
+	});
 } elsif ($cmd eq 'clean') {
 	if (@ARGV) {
 		print STDERR "E: The clean command takes no arguments\n";
@@ -384,6 +377,73 @@ sub update {
 		if $u;
 }
 
+sub make_changes {
+	my ($changes) = @_;
+	$changes->{installs} //= [];
+	$changes->{install_deps} //= [];
+	$changes->{upgrades} //= [];
+	$changes->{upgrade_deps} //= [];
+	$changes->{removes} //= [];
+	$changes->{remove_rdeps} //= [];
+
+	my $nc = @{$changes->{installs}}
+		+ @{$changes->{install_deps}}
+		+ @{$changes->{upgrade_deps}};
+	my $uc = @{$changes->{upgrades}};
+	my $rc = @{$changes->{removes}}
+		+ @{$changes->{remove_rdeps}};
+	my $nuc = list({ count_only => 1, upgradable => 1}) - $uc;
+	my $ask;
+
+	# deps for install
+	if (@{$changes->{install_deps}}) {
+		print "The following additional packages will be installed:\n";
+		print_array(sort @{$changes->{install_deps}});
+		$ask = 1;
+	}
+	# anything new to install (explicitly install, deps for install/upgrade)
+	if ($nc) {
+		print "The following NEW packages will be installed:\n";
+		print_array(sort(@{$changes->{installs}},
+			@{$changes->{install_deps}},
+			@{$changes->{upgrade_deps}}));
+	}
+	# upgrades
+	if ($uc) {
+		print "The following packages will be upgraded:\n";
+		print_array(sort @{$changes->{upgrades}});
+		$ask = 1;
+	}
+	# removes (explicit remove, and rdepends)
+	if ($rc) {
+		print "The following packages will be REMOVED:\n";
+		print_array(sort(@{$changes->{removes}},
+			@{$changes->{remove_rdeps}}));
+		$ask = 1;
+	}
+
+	print "$uc upgraded, $nc newly installed, $rc to remove and ",
+		"$nuc not upgraded.\n";
+	print "Need to get 68.1 MB of archives.\n";
+	#print "After this operation, 232 kB of additional disk space will be used.\n";
+	#print "After this operation, 13.1 MB disk space will be freed.\n";
+
+	if ($ask) {
+		local $| = 1;
+		print "Do you want to continue? [Y/n] ";
+		$_ = <STDIN>;
+		return
+			unless $_ =~ /^\s*(?:y.*)?\s*$/;
+	}
+
+	for my $pack (sort @{$changes->{installs}},
+			@{$changes->{upgrades}},
+			@{$changes->{install_deps}},
+			@{$changes->{upgrade_deps}}) {
+print "Download $pack\n";
+	}
+}
+
 sub upgradable {
 	my ($re, $t_rels, $t_vers) = argv2re(@_);
 
@@ -594,7 +654,7 @@ sub get_setup {
 	($setup{arch} = (uname)[4]) =~ s/^i6/x/;
 }
 
-sub list_array {
+sub print_array {
 	my ($width) = GetTerminalSize();
 	$width--;
 
