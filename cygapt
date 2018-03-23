@@ -380,7 +380,7 @@ sub make_changes {
 
 	my @get;
 	my ($get_size, $total_size) = (0, 0);
-	for my $pack (@{$changes->{installs}},
+	for my $pack (sort @{$changes->{installs}},
 			@{$changes->{install_deps}},
 			@{$changes->{upgrade_deps}},
 			@{$changes->{upgrades}}) {
