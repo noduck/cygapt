@@ -6,7 +6,6 @@ use feature qw(:5.20);
 use Getopt::Long qw(:config bundling no_ignore_case);
 use LWP;
 use Compress::Bzip2;
-use URI::Escape qw(uri_escape);
 use Text::Glob qw(glob_to_regex);
 use POSIX qw(uname);
 use Time::HiRes qw(time sleep);
@@ -116,12 +115,14 @@ if ($cmd eq 'list') {
 
 	my $opt = { };
 	if (depends($opt, @ARGV)) {
-		my $uh = $opt->{uninstalled_level};
-		my $u = [ sort { $uh->{$b} <=> $uh->{$a} } keys %$uh ];
+		my $uls = $opt->{uninstalled_level};
+		my @i = grep ! $uls->{$_}, keys %$uls;
+		my @d = sort { $uls->{$b} <=> $uls->{$a} }
+			grep $uls->{$_}, keys %$uls;
 
 		make_changes({
-			installs => [ ],
-			install_deps => $u,
+			installs => \@i,
+			install_deps => \@d,
 		});
 	}
 } elsif ($cmd eq 'remove') {
@@ -159,8 +160,6 @@ if ($cmd eq 'list') {
 		print STDERR "E: The clean command takes no arguments\n";
 		exit 10;
 	}
-	print STDERR "E: Not implemented yet\n";
-	exit 10;
 	clean();
 	exit 0;
 } elsif ($cmd eq 'autoremove') {
@@ -297,75 +296,29 @@ sub list {
 
 sub update {
 	local $| = 1;
-	my $ua = get_user_agent();
 
 	my $url = $setup{last_mirror}[0].'/'.$setup{arch}.'/setup.bz2';
-	print "get $url\n"
-		if $debug;
-	my $req = HTTP::Request->new(GET => $url);
 
-	my $setup_dir = $root.join("/", $setup{cache_mirror}, $setup{arch});
-	mkdir_p($setup_dir);
-	my $fh;
-	unless (open $fh, '>', "$setup_dir/setup.new") {
-		print STDERR "E: Could not write $setup_dir/setup.new: $!\n";
-		exit 10;
-	}
+	my $file = $root.join("/", $setup{cache_mirror}, $setup{arch},
+		"setup.ini");
+
 	my ($bz, $bzstat) = bzinflateInit;
-
-	my $data;
-	my $size = 0;
-	my $total_size;
-	my $start = time;
-	my $res = $ua->request($req, sub {
-		($data, $bzstat) = $bz->bzinflate($_[0]);
-		print $fh $data;
-
-		state $last = 0;
-		my $res = $_[1];
-		$total_size = $res->header('Content-Length') // -1
-			unless defined $total_size;
-		$size += length($_[0]);
-
-		my $now = time;
-		return
-			unless $now - $last > 0.1;
-		$last = $now;
-
-		my $s;
-		unless ($size || $total_size) {
-			$s = 'Waiting for headers';
-		} elsif ($total_size > 0) {
-			$s = sprintf("1 setup.bz2 %s/%s %d%%",
-				size2t($size), size2t($total_size),
-				100 * $size / $total_size);
+	my $res = http_get($url, $file, undef, sub {
+		if (defined $_[0]) {
+			my ($data, $bzstat) = $bz->bzinflate($_[0]);
+			return $data;
 		} else {
-			$s = "1 setup.bz2 ".size2t($size);
+			my ($data, $bzstat) = $bz->bzflush;
+			my $t = $data // '';
+			($data, $bzstat) = $bz->bzclose;
+			return $t.($data // '');
 		}
-		print "[$s]\r";
 	});
 
-	($data, $bzstat) = $bz->bzflush;
-	print $fh $data // '';
-	($data, $bzstat) = $bz->bzclose;
-	print $fh $data // '';
-	close($fh);
-	my $end = time;
-
-	if ($res->is_success) {
-		rename("$setup_dir/setup.new", "$setup_dir/setup.ini");
-		print "Get:1 $setup{last_mirror}[0]\n";
-		printf "Fetched %s in %ds (%s/s)\n",
-			size2t($total_size), $end - $start,
-			size2t($total_size / ($end - $start));
-
-	} else {
-		print "Err:1 $setup{last_mirror}[0]\n  ",
-			$res->message, "\n";
-		unlink("$setup_dir/setup.new");
-		print STDERR "W: Failed to fetch $url ",
-			$res->message, "\n";
+	unless ($res) {
+		exit 10;
 	}
+	http_done();
 
 	print "Reading state information... ";
 	get_installed();
@@ -424,11 +377,45 @@ sub make_changes {
 
 	print "$uc upgraded, $nc newly installed, $rc to remove and ",
 		"$nuc not upgraded.\n";
-	print "Need to get 68.1 MB of archives.\n";
-	#print "After this operation, 232 kB of additional disk space will be used.\n";
-	#print "After this operation, 13.1 MB disk space will be freed.\n";
 
-	if ($ask) {
+	my @get;
+	my ($get_size, $total_size) = (0, 0);
+	for my $pack (@{$changes->{installs}},
+			@{$changes->{install_deps}},
+			@{$changes->{upgrade_deps}},
+			@{$changes->{upgrades}}) {
+		my $p = $package{$pack};
+		unless ($p->{v_target}) {
+			print STDERR "E: no target version was ",
+				"selected for $pack\n";
+			exit 10;
+		}
+
+		my $v = $p->{versions}{$p->{v_target}};
+		my @install = split /\s+/, $v->{tag_install};
+		my $file = $root.join("/", $setup{cache_mirror}, $install[0]);
+		$total_size += $install[1];
+		next
+			if -f $file;
+
+		push @get, {
+			url => $v->{base}.$install[0],
+			file => $file,
+			size => $install[1],
+			hash => $install[2],
+		};
+		$get_size += $install[1];
+	}
+	print "Need to get ",
+		$total_size == $get_size ?  size2t($get_size)
+		: size2t($get_size)."/".size2t($total_size),
+		" of archives.\n";
+	# Cygwin does not provide information about installed size
+	# print "After this operation, ", ...
+	#	? "232 kB of additional disk space will be used.\n"
+	#	: "13.1 MB disk space will be freed.\n";
+
+	if ($ask && ! $yes) {
 		local $| = 1;
 		print "Do you want to continue? [Y/n] ";
 		$_ = <STDIN>;
@@ -436,12 +423,40 @@ sub make_changes {
 			unless $_ =~ /^\s*(?:y.*)?\s*$/;
 	}
 
-	for my $pack (sort @{$changes->{installs}},
-			@{$changes->{upgrades}},
-			@{$changes->{install_deps}},
-			@{$changes->{upgrade_deps}}) {
-print "Download $pack\n";
+	if (@get) {
+		my $c;
+		for my $g (@get) {
+			$c++
+				if http_get($g->{url}, $g->{file}, $g->{size});
+		}
+		if ($c == @get) {
+			http_done();
+		} else {
+			print STDERR "E: could not download all packages.\n";
+			exit 10;
+		}
 	}
+
+	if ($downloadonly) {
+		print "Download complete and in download only mode\n";
+		return;
+	}
+
+	for my $pack (@{$changes->{install_deps}},
+			@{$changes->{upgrade_deps}},
+			@{$changes->{installs}},
+			@{$changes->{upgrades}}) {
+print "Install $pack\n";
+	}
+	for my $pack (@{$changes->{remove_rdeps}},
+			@{$changes->{removes}}) {
+print "Remove $pack\n";
+	}
+}
+
+sub clean {
+	system('find', $root.CACHE,
+		qw(-mindepth 4 -maxdepth 4 -exec rm -r {} ;));
 }
 
 sub upgradable {
@@ -672,19 +687,6 @@ sub print_array {
 	print "\n";
 }
 
-sub get_user_agent {
-	my $ua = LWP::UserAgent->new(
-		agent => "cygapt/".VERSION
-	);
-	$ua->proxy(['http', 'https', 'ftp']
-		=> "http://".$setup{net_proxy_host}[0]
-			.":".$setup{net_proxy_port}[0])
-		if exists $setup{net_proxy_host}
-		&& exists $setup{net_proxy_port};
-	$ua->env_proxy;
-	return $ua;
-}
-
 sub get_installed {
 	my $fh;
 
@@ -893,6 +895,111 @@ sub select_package_versions {
 				$p->{versions}{$p->{v_target}}{version_idx});
 }
 
+my ($http_total_size, $http_start, $http_end);
+sub http_get {
+	my ($url, $file, $total_size, $sub) = @_;
+	$url =~ s{(?<=[^:])//+}{/}g;
+	print "get $url\n"
+		if $debug;
+	(my $name = $url) =~ s{^.*/}{};
+
+	state $ua = get_user_agent();
+	state $idx = 0;
+	$idx++;
+
+	my $fh;
+	(my $dir = $file) =~ s{[^/]+$}{};
+	mkdir_p($dir);
+	unless (open $fh, '>', "$file.new") {
+		print STDERR "E: Could not write $file.new: $!\n";
+		exit 10;
+	}
+
+	my $req = HTTP::Request->new(GET => $url);
+
+	my $data;
+	my $size = 0;
+	my $start = time;
+	$http_start = $start
+		unless $http_start && $http_start < $start;
+	my $res = $ua->request($req, sub {
+		my ($data) = @_;
+		$data = $sub->($data)
+			if $sub;
+		print $fh $data;
+
+		state $last = 0;
+		my $res = $_[1];
+		$total_size = $res->header('Content-Length') // -1
+			unless defined $total_size;
+		$size += length($_[0]);
+
+		my $now = time;
+		return
+			unless $now - $last > 0.1;
+		$last = $now;
+
+		my $s;
+		unless ($size || $total_size) {
+			$s = 'Waiting for headers';
+		} elsif ($total_size > 0) {
+			$s = sprintf("%s/%s %d%%",
+				size2t($size), size2t($total_size),
+				100 * $size / $total_size);
+		} else {
+			$s = size2t($size);
+		}
+		print "[$idx $name $s]\r";
+	});
+
+	# flush
+	$sub->(undef)
+		if $sub;
+
+	close($fh);
+	my $end = time;
+	$http_end = $end
+		unless $http_end && $http_end > $end;
+
+	if ($res->is_success) {
+		rename("$file.new", $file);
+		print "Get:$idx $url\n";
+		$http_total_size //= 0;
+		$http_total_size += $total_size // $size;
+		return $total_size // $size;
+	} else {
+		print "Err:1 $url\n ", $res->message, "\n";
+		unlink("$file.new");
+		print STDERR "W: Failed to fetch $url ", $res->message, "\n";
+		return 0;
+	}
+}
+
+sub http_done {
+	printf "Fetched %s in %ds (%s/s)\n",
+		size2t($http_total_size), $http_end - $http_start,
+		size2t($http_total_size / ($http_end - $http_start));
+}
+
+sub get_user_agent {
+	my $ua = LWP::UserAgent->new(
+		agent => "cygapt/".VERSION
+	);
+	$ua->proxy(['http', 'https', 'ftp']
+		=> "http://".$setup{net_proxy_host}[0]
+			.":".$setup{net_proxy_port}[0])
+		if exists $setup{net_proxy_host}
+		&& exists $setup{net_proxy_port};
+	$ua->env_proxy;
+	return $ua;
+}
+
+sub uri_escape {
+	my ($d) = @_;
+	$d =~ s{([:/])}{sprintf("%%%02x", ord($1))}ge;
+	return $d;
+}
+
 sub v2va {
 	# split into groups of non-digits and digits
 	# first is a group of digits
@@ -983,6 +1090,8 @@ sub size2t {
 		[ "%d kB", 1024, ],
 		[ "%.1f MB", 1024 * 1024, ],
 		[ "%d MB", 1024 * 1024, ],
+		[ "%.1f GB", 1024 * 1024 * 1024, ],
+		[ "%d GB", 1024 * 1024 * 1024, ],
 	];
 
 	my $t;
