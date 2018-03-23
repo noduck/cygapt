@@ -447,14 +447,30 @@ sub make_changes {
 
 	for my $pack (@{$changes->{install_deps}},
 			@{$changes->{upgrade_deps}},
-			@{$changes->{installs}},
-			@{$changes->{upgrades}}) {
+			@{$changes->{installs}}) {
 print "Install $pack\n";
+# tar [zZj]vf, and output goes to /etc/setup/$pack.lst.gz
+# write_installed();
+# run /etc/postinstall/$pack.sh, if it exists
+	}
+	for my $pack (@{$changes->{upgrades}}) {
+print "Upgrade $pack\n";
+# read /etc/setup/$pack.lst.gz
+# tar [zZj]vf, and output goes to /etc/setup/$pack.lst.gz
+# remove what is in old list, but not new
+# write_installed();
+# run /etc/postinstall/$pack.sh, if it exists
 	}
 	for my $pack (@{$changes->{remove_rdeps}},
 			@{$changes->{removes}}) {
 print "Remove $pack\n";
+# read /etc/setup/$pack.lst.gz and delete (only delete empty dir)
+# run /etc/preremove/$pack.sh, if it exists
+# remove /etc/setup/$pack.list.gz
+# write_installed();
 	}
+
+	unlock_installed();
 }
 
 sub clean {
@@ -710,12 +726,12 @@ sub get_installed {
 			next;
 		}
 
-		unless (/^(\S+)\s+\1-(\S+)\.tar\.\S+\s+(\d+)$/) {
+		unless (/^(\S+)\s+(\1-(\S+)\.tar\.\S+)\s+(\d+)$/) {
 			print STDERR "W: Did not recognize ", $root.INSTALLED,
 				" format: $_";
 			next;
 		}
-		my ($pack, $version, $picked) = ($1, $2, $3);
+		my ($pack, $file, $version, $picked) = ($1, $2, $3, $4);
 
 		my $p;
 		if (exists $package{$pack}) {
@@ -741,6 +757,7 @@ sub get_installed {
 
 		$v->{installed} = 1;
 		$v->{tag_version} = $version;
+		$v->{file} = $file;
 		push @{$v->{releases}}, 'now';
 	}
 
@@ -752,7 +769,8 @@ sub lock_installed {
 	return
 		if $installed_fh;
 
-	unless (open $installed_fh, '>', $root.INSTALLED) {
+	rename($root.INSTALLED, $root.INSTALLED.".orig");
+	unless (open $installed_fh, '+>', $root.INSTALLED) {
 		print STDERR "E: Cannot open ", $root.INSTALLED, ": $!\n";
 		exit 10;
 	}
@@ -761,13 +779,44 @@ sub lock_installed {
 			" - open ($!)\n";
 		exit 10;
 	}
+
+	write_installed();
 }
 
 sub write_installed {
 	seek($installed_fh, 0, SEEK_SET);
+
+	print $installed_fh "INSTALLED.DB 3\n";
+	for my $pack (sort keys %package) {
+		my $p = $package{$pack};
+		next
+			unless $p->{v_installed};
+
+		my $file;
+		if (exists $p->{versions}{$p->{v_installed}}) {
+			my $v = $p->{versions}{$p->{v_installed}};
+			if (exists $v->{file}) {
+				$file = $v->{file};
+			} elsif (exists $v->{tag_install}) {
+				$file = $v->{tag_install};
+				$file =~ s{\s+.*$}{};
+				$file =~ s{^.*/}{};
+			}
+		}
+		$file //= "$pack-$p->{v_installed}.tar.bz2";
+
+		print $installed_fh "$pack $file $p->{picked}\n";
+	}
+
+	if ($debug > 1) {
+		print "INSTALLED DIFF:\n";
+		system('diff', '-u', $root.INSTALLED.".orig", $root.INSTALLED);
+		print "END INSTALLED DIFF:\n";
+	}
 }
 
 sub unlock_installed {
+	write_installed();
 	flock($installed_fh, LOCK_UN | LOCK_NB);
 	close($installed_fh);
 	$installed_fh = undef;
