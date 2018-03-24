@@ -456,20 +456,12 @@ sub make_changes {
 		do_install($pack, $package{$pack}{v_target}, $file{$pack}, 1);
 	}
 	for my $pack (@{$changes->{upgrades}}) {
-print "Upgrade $pack\n";
-# read /etc/setup/$pack.lst.gz
-# tar [zZj]vf, and output goes to /etc/setup/$pack.lst.gz
-# remove what is in old list, but not new
-# write_installed();
-# run /etc/postinstall/$pack.sh, if it exists
+		do_upgrade($pack, $package{$pack}{v_installed},
+			$package{$pack}{v_target}, $file{$pack});
 	}
 	for my $pack (@{$changes->{remove_rdeps}},
 			@{$changes->{removes}}) {
-print "Remove $pack\n";
-# read /etc/setup/$pack.lst.gz and delete (only delete empty dir)
-# run /etc/preremove/$pack.sh, if it exists
-# remove /etc/setup/$pack.list.gz
-# write_installed();
+		do_remove($pack);
 	}
 
 	unlock_installed();
@@ -516,13 +508,129 @@ sub do_install {
 		$post =~ s{^$root}{};
 		system($root ? ('chroot', "$root/") : (),
 			'/bin/sh', $post);
-		rename($post, "$post.done");
+		rename($root.$post, "$root$post.done");
 	}
 
 	my $p = $package{$pack};
 	$p->{v_installed} = $vers;
 	$p->{versions}{$p->{v_installed}}{installed} = 1;
 	$p->{picked} = $picked;
+	write_installed();
+}
+
+sub do_upgrade {
+	my ($pack, $old_vers, $new_vers, $tar) = @_;
+
+	(my $fname = $tar) =~ s{^.*/}{};
+	print "Preparing to unpack .../$fname ...\n";
+	my %old_file;
+	my $lst_fh;
+	my $lst_name = "$root/etc/setup/$pack.lst.gz";
+	if ($lst_fh = gzopen($lst_name, 'rb')) {
+		my $line;
+		while($lst_fh->gzreadline($line)) {
+			chomp($line);
+			$old_file{$line}++;
+		}
+		$lst_fh->gzclose;
+	}
+
+	unless ($lst_fh = gzopen($lst_name, 'wb')) {
+		print STDERR "E: Cannot write $lst_name: $!\n";
+		exit 10;
+	}
+
+	print "Unpacking $pack ($new_vers) over ($old_vers) ...\n";
+	my $tar_fh;
+	unless (open $tar_fh, '-|',
+		'tar', '-C', "$root/",
+		$tar =~ m{\.gz} ? '-z'
+			: $tar =~ m{\.bz2} ? '-j'
+			: $tar =~ m{\.bz2} ? '-J'
+			: (),
+		'-vxf', $tar) {
+		print STDERR "E: Cannot start tar $tar: $!\n";
+		exit 10;
+	}
+
+	while(<$tar_fh>) {
+		$lst_fh->gzwrite($_);
+		print $_
+			if $debug;
+		chomp;
+		delete $old_file{$_};
+	}
+
+	close($tar_fh);
+	$lst_fh->gzclose;
+
+	for my $file (sort { $b cmp $a } keys %old_file) {
+# TODO: how to test this?
+		if ($file =~ m{^etc/postinstall/.*\.sh$}) {
+			unlink "$root/$file";
+			unlink "$root/$file.done";
+		} elsif ($file =~ m{/$}) {
+			rmdir "$root/$file";
+		} else {
+			unlink "$root/$file";
+		}
+	}
+
+	print "Setting up $pack ($new_vers) ...\n";
+	for my $post (glob("$root/etc/postinstall/*.sh")) {
+		print "running $post\n"
+			if $debug;
+		$post =~ s{^$root}{};
+		system($root ? ('chroot', "$root/") : (),
+			'/bin/sh', $post);
+		rename($root.$post, "$root$post.done");
+	}
+
+	my $p = $package{$pack};
+	$p->{v_installed} = $new_vers;
+	delete $p->{versions}{$old_vers}{installed};
+	$p->{versions}{$new_vers}{installed} = 1;
+	write_installed();
+}
+
+sub do_remove {
+	my ($pack) = @_;
+	my $p = $package{$pack};
+
+	print "Removing $pack ($p->{v_installed}) ...\n";
+
+	my $pre = "/etc/preremove/$pack.sh";
+	if (-f $root.$pre) {
+		print "running $pre\n"
+			if $debug || 1;
+		system($root ? ('chroot', "$root/") : (),
+			'/bin/sh', $pre);
+	}
+
+	my $lst_fh;
+	my $lst_name = "$root/etc/setup/$pack.lst.gz";
+	if ($lst_fh = gzopen($lst_name, 'rb')) {
+		my $line;
+		while($lst_fh->gzreadline($line)) {
+			chomp($line);
+			if ($line =~ m{^etc/postinstall/.*\.sh$}) {
+				unlink "$root/$line";
+				unlink "$root/$line.done";
+			} elsif ($line =~ m{/$}) {
+				rmdir "$root/$line";
+			} else {
+				unlink "$root/$line";
+			}
+		}
+		$lst_fh->gzclose;
+		unlink($lst_name);
+	} else {
+		print STDERR "W: Cannot read $lst_name: $!\n";
+	}
+
+	delete $p->{versions}{$p->{v_installed}}{installed};
+	delete $p->{v_installed};
+	delete $p->{picked};
 	write_installed();
 }
 
@@ -863,6 +971,7 @@ sub write_installed {
 
 		print $installed_fh "$pack $file $p->{picked}\n";
 	}
+	truncate($installed_fh, tell($installed_fh));
 
 	if ($debug > 1) {
 		print "INSTALLED DIFF:\n";
