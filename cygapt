@@ -506,6 +506,7 @@ sub do_install {
 		print "running $post\n"
 			if $debug;
 		$post =~ s{^$root}{};
+# TODO: shouldn't need /bin/sh
 		system($root ? ('chroot', "$root/") : (),
 			'/bin/sh', $post);
 		rename($root.$post, "$root$post.done");
@@ -581,6 +582,7 @@ sub do_upgrade {
 		print "running $post\n"
 			if $debug;
 		$post =~ s{^$root}{};
+# TODO: shouldn't need /bin/sh
 		system($root ? ('chroot', "$root/") : (),
 			'/bin/sh', $post);
 		rename($root.$post, "$root$post.done");
@@ -603,6 +605,7 @@ sub do_remove {
 	if (-f $root.$pre) {
 		print "running $pre\n"
 			if $debug;
+# TODO: shouldn't need /bin/sh
 		system($root ? ('chroot', "$root/") : (),
 			'/bin/sh', $pre);
 	}
@@ -669,6 +672,9 @@ sub upgradable {
 
 		push @upgrade, $pack;
 	}
+
+# TODO: upgrades of already installed should also follow dependency order!
+# otherwise, do lib before others
 
 	my %opt;
 	depends(\%opt, @upgrade)
