@@ -81,8 +81,8 @@ get_setup();
 if ($cmd eq 'list') {
 	$| = 1;
 	print "Listing... ";
-	get_installed();
 	get_available();
+	get_installed();
 	print "Done\n";
 	list({ upgradable => $upgradable, installed => $installed,
 		all => $allversions },
@@ -111,11 +111,15 @@ if ($cmd eq 'list') {
 	print "Reading package lists... ";
 	get_available();
 	print "Done\n";
+	print "Building dependency tree\n";
+	build_tree();
 	print "Reading state information... ";
 	get_installed();
 	print "Done\n";
 
 	my $opt = { };
+# TODO: error if one ARGV doesn't resolve to at least on package
+# E: Unable to locate package bzrdef*
 	if (depends($opt, @ARGV)) {
 		my $uls = $opt->{uninstalled_level};
 		my @i = grep ! $uls->{$_}, keys %$uls;
@@ -132,11 +136,15 @@ if ($cmd eq 'list') {
 	print "Reading package lists... ";
 	get_available();
 	print "Done\n";
+	print "Building dependency tree\n";
+	build_tree();
 	print "Reading state information... ";
 	get_installed();
 	print "Done\n";
 
 	my $opt = { print => 0 };
+# TODO: error if one ARGV doesn't resolve to at least on package
+# E: Unable to locate package bzrdef*
 	list_rdepends($opt, @ARGV);
 	my $u = $opt->{installed_level};
 	make_changes({
@@ -147,9 +155,13 @@ if ($cmd eq 'list') {
 	print "Reading package lists... ";
 	get_available();
 	print "Done\n";
+	print "Building dependency tree\n";
+	build_tree();
 	print "Reading state information... ";
 	get_installed();
 	print "Done\n";
+# TODO: error if one ARGV doesn't resolve to at least on package
+# E: Unable to locate package bzrdef*
 	my ($upgrades, $new_deps) = upgradable(@ARGV);
 	print "Calculating upgrade... Done\n";
 
@@ -381,6 +393,8 @@ sub make_changes {
 
 	print "$uc upgraded, $nc newly installed, $rc to remove and ",
 		"$nuc not upgraded.\n";
+	return
+		unless $uc || $nc || $rc;
 
 	my @get;
 	my %file;
@@ -506,10 +520,9 @@ sub do_install {
 		print "running $post\n"
 			if $debug;
 		$post =~ s{^$root}{};
-# TODO: shouldn't need /bin/sh
-		system($root ? ('chroot', "$root/") : (),
-			'/bin/sh', $post);
-		rename($root.$post, "$root$post.done");
+		my $rc = system($root ? ('chroot', "$root/") : (), $post);
+		rename($root.$post, "$root$post.done")
+			unless $rc;
 	}
 
 	my $p = $package{$pack};
@@ -582,10 +595,9 @@ sub do_upgrade {
 		print "running $post\n"
 			if $debug;
 		$post =~ s{^$root}{};
-# TODO: shouldn't need /bin/sh
-		system($root ? ('chroot', "$root/") : (),
-			'/bin/sh', $post);
-		rename($root.$post, "$root$post.done");
+		my $rc = system($root ? ('chroot', "$root/") : (), $post);
+		rename($root.$post, "$root$post.done")
+			unless $rc;
 	}
 
 	my $p = $package{$pack};
@@ -605,9 +617,7 @@ sub do_remove {
 	if (-f $root.$pre) {
 		print "running $pre\n"
 			if $debug;
-# TODO: shouldn't need /bin/sh
-		system($root ? ('chroot', "$root/") : (),
-			'/bin/sh', $pre);
+		system($root ? ('chroot', "$root/") : (), $pre);
 	}
 
 	my $lst_fh;
@@ -682,6 +692,65 @@ sub upgradable {
 
 	my $u = $opt{uninstalled_level};
 	return (\@upgrade, [ sort { $u->{$b} <=> $u->{$a} } keys %$u ]);
+}
+
+sub build_tree {
+	for my $p (values %package) {
+		_build_tree($p, 0);
+	}
+}
+
+sub _build_tree {
+	my ($p, $n) = @_;
+
+	return
+		if exists $p->{dep_depth};
+	# loop detection
+	print "_build_tree $p->{name} [$n]\n"
+		if $debug > 2;
+	if ($p->{loop}) {
+		print "looping on $p->{name}; depth 0\n"
+			if $debug > 2;
+		$p->{dep_depth} = 0;
+		return;
+	}
+	$p->{loop} = 1;
+
+	my $max_dep_depth = 0;
+	for my $v (values %{$p->{versions}}) {
+		my @dep;
+		if (exists $v->{tag_depends2}) {
+			@dep = split /,\s*/, $v->{tag_depends2};
+		} elsif (exists $p->{tag_requires}) {
+			@dep = split /\s+/, $p->{tag_requires};
+		}
+		$v->{deps} = \@dep;
+
+		print "\t$p->{name} $v->{version}: @dep\n"
+			if $debug > 2;
+		if (@dep) {
+			for my $d (@dep) {
+				unless (exists $package{$d}) {
+					print "unsatisfied dep from ",
+						"$p->{name} to $d\n"
+						if $debug;
+					$max_dep_depth = -10_000;
+					last;
+				}
+				my $rd = $package{$d};
+				push @{$rd->{rdeps}}, $p->{name};
+				_build_tree($rd, $n+1);
+				$max_dep_depth = $rd->{dep_depth} + 1
+					unless $max_dep_depth
+						> $rd->{dep_depth} + 1;
+			}
+		}
+	}
+
+	$p->{dep_depth} = $max_dep_depth;
+	delete $p->{loop};
+	print "_build_tree $p->{name} [$n]: $max_dep_depth\n"
+		if $debug > 2;
 }
 
 sub list_depends {
@@ -954,6 +1023,12 @@ sub write_installed {
 	die "write_installed() called without lock held"
 		unless $installed_fh;
 
+	# protect against incomplete installed.db updates
+	my $break;
+	local $SIG{INT} = sub { $break = 1 };
+	$SIG{TERM} = $SIG{INT};
+	$SIG{QUIT} = $SIG{INT};
+
 	seek($installed_fh, 0, SEEK_SET);
 
 	print $installed_fh "INSTALLED.DB 3\n";
@@ -983,6 +1058,11 @@ sub write_installed {
 		print "INSTALLED DIFF:\n";
 		system('diff', '-u', $root.INSTALLED.".orig", $root.INSTALLED);
 		print "END INSTALLED DIFF:\n";
+	}
+
+	if ($break) {
+		print STDERR "E: Killed\n";
+		exit 10;
 	}
 }
 
@@ -1106,6 +1186,12 @@ sub _available_store {
 
 sub select_package_versions {
 	my ($p, $t_rel, $t_ver) = @_;
+
+	return
+		if exists $p->{t_rel} && $p->{t_rel} eq ($t_rel // '')
+		&& exists $p->{t_ver} && $p->{t_ver} eq ($t_ver // '');
+	$p->{t_rel} = $t_rel // '';
+	$p->{t_ver} = $t_ver // '';
 
 	print "find $p->{name} for rel ", $t_rel // '<u>', 
 		" ver ", $t_ver // '<u>', "\n"
