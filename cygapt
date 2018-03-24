@@ -602,7 +602,7 @@ sub do_remove {
 	my $pre = "/etc/preremove/$pack.sh";
 	if (-f $root.$pre) {
 		print "running $pre\n"
-			if $debug || 1;
+			if $debug;
 		system($root ? ('chroot', "$root/") : (),
 			'/bin/sh', $pre);
 	}
