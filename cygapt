@@ -6,6 +6,7 @@ use feature qw(:5.20);
 use Getopt::Long qw(:config bundling no_ignore_case);
 use Fcntl qw(:flock SEEK_SET);
 use LWP;
+use Compress::Zlib;
 use Compress::Bzip2;
 use Text::Glob qw(glob_to_regex);
 use POSIX qw(uname);
@@ -382,6 +383,7 @@ sub make_changes {
 		"$nuc not upgraded.\n";
 
 	my @get;
+	my %file;
 	my ($get_size, $total_size) = (0, 0);
 	for my $pack (sort @{$changes->{installs}},
 			@{$changes->{install_deps}},
@@ -397,6 +399,7 @@ sub make_changes {
 		my $v = $p->{versions}{$p->{v_target}};
 		my @install = split /\s+/, $v->{tag_install};
 		my $file = $root.join("/", $setup{cache_mirror}, $install[0]);
+		$file{$pack} = $file;
 		$total_size += $install[1];
 		next
 			if -f $file;
@@ -446,12 +449,11 @@ sub make_changes {
 	}
 
 	for my $pack (@{$changes->{install_deps}},
-			@{$changes->{upgrade_deps}},
-			@{$changes->{installs}}) {
-print "Install $pack\n";
-# tar [zZj]vf, and output goes to /etc/setup/$pack.lst.gz
-# write_installed();
-# run /etc/postinstall/$pack.sh, if it exists
+			@{$changes->{upgrade_deps}}) {
+		do_install($pack, $package{$pack}{v_target}, $file{$pack}, 0);
+	}
+	for my $pack (@{$changes->{installs}}) {
+		do_install($pack, $package{$pack}{v_target}, $file{$pack}, 1);
 	}
 	for my $pack (@{$changes->{upgrades}}) {
 print "Upgrade $pack\n";
@@ -471,6 +473,57 @@ print "Remove $pack\n";
 	}
 
 	unlock_installed();
+}
+
+sub do_install {
+	my ($pack, $vers, $tar, $picked) = @_;
+
+	(my $fname = $tar) =~ s{^.*/}{};
+	print "Preparing to unpack .../$fname ...\n";
+	my $lst_fh;
+	my $lst_name = "$root/etc/setup/$pack.lst.gz";
+	unless ($lst_fh = gzopen($lst_name, 'wb')) {
+		print STDERR "E: Cannot write $lst_name: $!\n";
+		exit 10;
+	}
+
+	print "Unpacking $pack ($vers) ...\n";
+	my $tar_fh;
+	unless (open $tar_fh, '-|',
+		'tar', '-C', "$root/",
+		$tar =~ m{\.gz} ? '-z'
+			: $tar =~ m{\.bz2} ? '-j'
+			: $tar =~ m{\.bz2} ? '-J'
+			: (),
+		'-vxf', $tar) {
+		print STDERR "E: Cannot start tar $tar: $!\n";
+		exit 10;
+	}
+
+	while(<$tar_fh>) {
+		$lst_fh->gzwrite($_);
+		print $_
+			if $debug;
+	}
+
+	close($tar_fh);
+	$lst_fh->gzclose;
+
+	print "Setting up $pack ($vers) ...\n";
+	for my $post (glob("$root/etc/postinstall/*.sh")) {
+		print "running $post\n"
+			if $debug;
+		$post =~ s{^$root}{};
+		system($root ? ('chroot', "$root/") : (),
+			'/bin/sh', $post);
+		rename($post, "$post.done");
+	}
+
+	my $p = $package{$pack};
+	$p->{v_installed} = $vers;
+	$p->{versions}{$p->{v_installed}}{installed} = 1;
+	$p->{picked} = $picked;
+	write_installed();
 }
 
 sub clean {
@@ -784,6 +837,9 @@ sub lock_installed {
 }
 
 sub write_installed {
+	die "write_installed() called without lock held"
+		unless $installed_fh;
+
 	seek($installed_fh, 0, SEEK_SET);
 
 	print $installed_fh "INSTALLED.DB 3\n";
