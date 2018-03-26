@@ -500,6 +500,12 @@ sub do_install {
 
 	(my $fname = $tar) =~ s{^.*/}{};
 	print "Preparing to unpack .../$fname ...\n";
+
+	if ($dryrun) {
+		print "\tdryrun\n";
+		return;
+	}
+
 	my $lst_fh;
 	my $lst_name = "$root/etc/setup/$pack.lst.gz";
 	unless ($lst_fh = gzopen($lst_name, 'wb')) {
@@ -551,6 +557,12 @@ sub do_upgrade {
 
 	(my $fname = $tar) =~ s{^.*/}{};
 	print "Preparing to unpack .../$fname ...\n";
+
+	if ($dryrun) {
+		print "\tdryrun\n";
+		return;
+	}
+
 	my %old_file;
 	my $lst_fh;
 	my $lst_name = "$root/etc/setup/$pack.lst.gz";
@@ -626,6 +638,11 @@ sub do_remove {
 	my $p = $package{$pack};
 
 	print "Removing $pack ($p->{v_installed}) ...\n";
+
+	if ($dryrun) {
+		print "\tdryrun\n";
+		return;
+	}
 
 	my $pre = "/etc/preremove/$pack.sh";
 	if (-f $root.$pre) {
@@ -777,7 +794,9 @@ sub upgradable {
 		if @upgrade;
 
 	my $u = $opt{uninstalled_level};
-	return (\@upgrade, [ sort { $u->{$b} <=> $u->{$a} } keys %$u ]);
+	return ([ sort { $package{$b}{dep_depth} <=> $package{$a}{dep_depth} }
+			@upgrade ],
+		[ sort { $u->{$b} <=> $u->{$a} } keys %$u ]);
 }
 
 sub list_depends {
