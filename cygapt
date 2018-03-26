@@ -142,6 +142,7 @@ if ($cmd eq 'list') {
 	get_installed();
 	print "Done\n";
 
+# TODO: remove only removes the dependents, not the package itself?
 	my $opt = { print => 0 };
 	exit 10
 		unless list_rdepends($opt, @ARGV);
