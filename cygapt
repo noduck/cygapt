@@ -142,7 +142,6 @@ if ($cmd eq 'list') {
 	get_installed();
 	print "Done\n";
 
-# TODO: remove only removes the dependents, not the package itself?
 	my $opt = { print => 0 };
 	exit 10
 		unless list_rdepends($opt, @ARGV);
@@ -938,6 +937,7 @@ sub list_rdepends {
 
 		print $pack, "\n"
 			if $opt->{print};
+		$opt->{installed_level}{$pack} = $opt->{level};
 		rdepends({ %$opt, level => $opt->{level}+1 }, $pack);
 	}
 
@@ -961,7 +961,7 @@ sub rdepends {
 			|| ! $package{$pack}{v_installed};
 		my $p = $package{$pack};
 		$opt->{rdepends}{$pack} = 1;
-		$opt->{installed_level}{$pack} = $p->{dep_depth};
+		$opt->{installed_level}{$pack} = $opt->{level};
 
 		print '  ' x $opt->{level}, "$pack\n"
 			if $opt->{print};
