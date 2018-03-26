@@ -117,20 +117,19 @@ if ($cmd eq 'list') {
 	get_installed();
 	print "Done\n";
 
-	my $opt = { };
-# TODO: error if one ARGV doesn't resolve to at least on package
-# E: Unable to locate package bzrdef*
-	if (depends($opt, @ARGV)) {
-		my $uls = $opt->{uninstalled_level};
-		my @i = grep ! $uls->{$_}, keys %$uls;
-		my @d = sort { $uls->{$b} <=> $uls->{$a} }
-			grep $uls->{$_}, keys %$uls;
+	my $opt = { print => 0 };
+	exit 10
+		unless list_depends($opt, @ARGV);
 
-		make_changes({
-			installs => \@i,
-			install_deps => \@d,
-		});
-	}
+	my $uls = $opt->{uninstalled_level};
+	my @i = grep ! $uls->{$_}, keys %$uls;
+	my @d = sort { $uls->{$b} <=> $uls->{$a} }
+		grep $uls->{$_}, keys %$uls;
+
+	make_changes({
+		installs => \@i,
+		install_deps => \@d,
+	});
 } elsif ($cmd eq 'remove') {
 	$| = 1;
 	print "Reading package lists... ";
@@ -143,9 +142,8 @@ if ($cmd eq 'list') {
 	print "Done\n";
 
 	my $opt = { print => 0 };
-# TODO: error if one ARGV doesn't resolve to at least on package
-# E: Unable to locate package bzrdef*
-	list_rdepends($opt, @ARGV);
+	exit 10
+		unless list_rdepends($opt, @ARGV);
 	my $u = $opt->{installed_level};
 	make_changes({
 		removes => [ sort { $u->{$b} <=> $u->{$a} } keys %$u ],
@@ -162,6 +160,8 @@ if ($cmd eq 'list') {
 	print "Done\n";
 # TODO: error if one ARGV doesn't resolve to at least on package
 # E: Unable to locate package bzrdef*
+
+# TODO: upgrade doesn't find new deps for "znc"
 	my ($upgrades, $new_deps) = upgradable(@ARGV);
 	print "Calculating upgrade... Done\n";
 
@@ -190,19 +190,36 @@ if ($cmd eq 'list') {
 		print STDERR "E: No packages found\n";
 		exit 10;
 	}
-	get_installed();
+	$| = 1;
+	print "Reading package lists... ";
 	get_available();
-	list_depends(@ARGV);
-	exit 0;
+	print "Done\n";
+	print "Building dependency tree\n";
+	build_tree();
+	print "Reading state information... ";
+	get_installed();
+	print "Done\n";
+
+	list_depends({
+			recurse => $recurse ? ~0 : 1,
+			fullrecurse => $fullrecurse ? ~0 : 1,
+		},@ARGV);
 } elsif ($cmd eq 'rdepends') {
 	unless (@ARGV) {
 		print STDERR "E: No packages found\n";
 		exit 10;
 	}
-	get_installed();
+	$| = 1;
+	print "Reading package lists... ";
 	get_available();
+	print "Done\n";
+	print "Building dependency tree\n";
+	build_tree();
+	print "Reading state information... ";
+	get_installed();
+	print "Done\n";
+
 	list_rdepends(@ARGV);
-	exit 0;
 }
 exit 0;
 
@@ -755,18 +772,21 @@ sub _build_tree {
 
 sub list_depends {
 	my $opt = { };
-	$opt = { %{shift @_} }
+	$opt = shift @_
 		if @_ && ref $_[0] eq 'HASH';
-	$opt->{fullrecurse} = $fullrecurse ? ~0 : 1;
-	$opt->{recurse} = $recurse ? ~0 : 1;
-	$opt->{print} = 1;
+	$opt->{fullrecurse} //= 1;
+	$opt->{recurse} //= ~0;
+	$opt->{print} //= 1;
+	$opt->{uninstalled_level} //= { };
 
+	my @arg_found;
 	my ($re, $t_rels, $t_vers) = argv2re(@_);
 
 	for my $pack (sort keys %package) {
 		$a = undef;
 		next
 			if $re && $pack !~ $re;
+		$arg_found[$a]++;
 		my $p = $package{$pack};
 
 		$opt->{t_rel} = $t_rels->[$a];
@@ -774,6 +794,15 @@ sub list_depends {
 
 		depends($opt, $pack);
 	}
+
+	my $rc = 1;
+	for my $i (0..$#_) {
+		next
+			if $arg_found[$i];
+		print STDERR "E: Unable to locate package $_[$i]\n";
+		$rc = 0;
+	}
+	return $rc;
 }
 
 sub depends {
@@ -787,7 +816,7 @@ sub depends {
 	return $rc
 		if $opt->{depends}{$pack};
 	unless (exists $package{$pack}) {
-		print STDERR "W: no installable version for $pack\n";
+		print STDERR "E: no installable version for $pack\n";
 		return 0;
 	}
 	my $p = $package{$pack};
@@ -805,18 +834,11 @@ sub depends {
 		|| (exists $opt->{uninstalled_level}{$pack}
 			&& $opt->{uninstalled_level}{$pack} > $opt->{level});
 	unless ($p->{v_target}) {
-		print STDERR "W: no installable version for $pack\n";
+		print STDERR "E: no installable version for $pack\n";
 		return 0;
 	}
 
 	my $v = $p->{versions}{$p->{v_target}};
-	my @dep;
-	if (exists $v->{tag_depends2}) {
-		@dep = split /,\s*/, $v->{tag_depends2};
-	} elsif (exists $p->{tag_requires}) {
-		@dep = split /\s+/, $p->{tag_requires};
-	}
-
 	my %opt2 = (
 		%$opt,
 		level => $opt->{level}+1,
@@ -824,7 +846,7 @@ sub depends {
 		fullrecurse => $opt->{fullrecurse}-1,
 		t_ver => undef
 	);
-	for my $d (@dep) {
+	for my $d (@{$v->{deps}}) {
 		$rc = 0
 			unless depends(\%opt2, $d);
 	}
@@ -838,55 +860,47 @@ sub list_rdepends {
 		if @_ && ref $_[0] eq 'HASH';
 	$opt->{print} //= 1;
 	$opt->{level} //= 0;
+	$opt->{installed_level} //= { };
 
+	my @arg_found;
 	my ($re) = argv2re(@_);
 	for my $pack (sort keys %package) {
 		next
 			unless $pack =~ m{$re}
-			&& ! exists $opt->{rdepends}{$pack};
+			&& ! exists $opt->{rdepends}{$pack}
+			&& $package{$pack}{v_installed};
+		$arg_found[$a]++;
 		my $p = $package{$pack};
-		next
-			unless $p->{v_installed};
 
 		print $pack, "\n"
 			if $opt->{print};
-		$opt->{installed_level}{$pack} = $opt->{level}
-			unless exists $opt->{installed_level}{$pack}
-			&& $opt->{installed_level}{$pack} > $opt->{level};
 		rdepends({ %$opt, level => $opt->{level}+1 }, $pack);
 	}
+
+	my $rc = 1;
+	for my $i (0..$#_) {
+		next
+			if $arg_found[$i];
+		print STDERR "E: Unable to locate installed package $_[$i]\n";
+		$rc = 0;
+	}
+	return $rc;
 }
 
 sub rdepends {
 	my ($opt, $dep) = @_;
 	$opt->{level} //= 0;
 
-	for my $pack (sort keys %package) {
+	for my $pack (@{$package{$dep}{rdeps}}) {
 		next
-			if exists $opt->{installed_level}{$pack};
+			if exists $opt->{rdepends}{$pack}
+			|| ! $package{$pack}{v_installed};
 		my $p = $package{$pack};
-		next
-			unless $p->{v_installed};
+		$opt->{rdepends}{$pack} = 1;
+		$opt->{installed_level}{$pack} = $p->{dep_depth};
 
-		my $v = $p->{versions}{$p->{v_installed}};
-		unless (exists $v->{depends}) {
-			my @dep;
-			if (exists $v->{tag_depends2}) {
-				@dep = split /,\s*/, $v->{tag_depends2};
-			} elsif (exists $p->{tag_requires}) {
-				@dep = split /\s+/, $p->{tag_requires};
-			}
-			$v->{depends} = \@dep;
-		}
-
-		next
-			unless grep $_ eq $dep, @{$v->{depends}};
 		print '  ' x $opt->{level}, "$pack\n"
 			if $opt->{print};
-		$opt->{installed_level}{$pack} = $opt->{level}
-			unless exists $opt->{installed_level}{pack}
-			&& $opt->{installed_level}{pack} > $opt->{level};
-
 		rdepends({ %$opt, level => $opt->{level}+1 }, $pack);
 	}
 }
