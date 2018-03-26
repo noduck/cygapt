@@ -764,6 +764,7 @@ sub _build_tree {
 }
 
 sub upgradable {
+# TODO: upgrade of named package should also upgrade all depends!
 	my @arg_found;
 	my ($re, $t_rels, $t_vers) = argv2re(@_);
 
@@ -819,6 +820,7 @@ sub upgradable {
 }
 
 sub list_depends {
+# TODO: should depends list depends for installed or target version?
 	my $opt = { };
 	$opt = shift @_
 		if @_ && ref $_[0] eq 'HASH';
@@ -918,6 +920,7 @@ sub depends {
 }
 
 sub list_rdepends {
+# TODO: should rdepends list depends for installed or target version?
 	my $opt = { };
 	$opt = shift @_
 		if @_ && ref $_[0] eq 'HASH';
@@ -1367,7 +1370,9 @@ sub http_get {
 		} else {
 			$s = size2t($size);
 		}
+# TODO: clear until the end of the line
 		print "[$idx $name $s]\r";
+# TODO: overall progress??
 	});
 
 	# flush
