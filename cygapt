@@ -15,6 +15,7 @@ use Term::ReadKey;
 use Data::Dumper;
 
 # TODO: link last-cache to /var/cache/cygapt??
+# TODO: write to a log file (and rotate it if older than today)
 
 use constant {
 	SETUP => "/etc/setup/setup.rc",
@@ -582,6 +583,26 @@ sub do_upgrade {
 
 	print "Unpacking $pack ($new_vers) over ($old_vers) ...\n";
 	my $tar_fh;
+# TODO: error here; upgrade replace a Perl dll, and then child loads newer...
+#
+#Preparing to unpack .../perl_base-5.26.1-1.tar.xz ...
+#Unpacking perl_base (5.26.1-1) over (5.22.3-1) ...
+#Setting up perl_base (5.26.1-1) ...
+#Preparing to unpack .../ncurses-6.0-12.20171125.tar.xz ...
+#Unpacking ncurses (6.0-12.20171125) over (6.0-10.20170325) ...
+#      4 [main] perl 4596 child_info_fork::abort: C:\Cygwin\bin\cygperl5_26.dll: Loaded to different address: parent(0x3F2FF0000) != child(0x465770000)
+#Can't fork, trying again in 5 seconds at ./cygapt line 585, <$installed_fh> line 26.
+#
+#Preparing to unpack .../perl-Compress-Bzip2-2.26-2.tar.xz ...
+#Unpacking perl-Compress-Bzip2 (2.26-2) over (2.26-1) ...
+#Setting up perl-Compress-Bzip2 (2.26-2) ...
+#Preparing to unpack .../perl-Devel-Symdump-2.18-2.tar.xz ...
+#Unpacking perl-Devel-Symdump (2.18-2) over (2.18-1) ...
+#    295 [main] perl 7552 child_info_fork::abort: C:\Cygwin\lib\perl5\vendor_perl\5.26\x86_64-cygwin-threads\auto\Compress\Bzip2\Bzip2.dll: Loaded to different address: parent(0x3EC3D0000) != child(0x55A250000)
+#Can't fork, trying again in 5 seconds at ./cygapt line 585, <$installed_fh> line 16.
+#
+# TODO: warning about restarting openssh service if needed...
+
 	unless (open $tar_fh, '-|',
 		'tar', '-C', "$root/",
 		$tar =~ m{\.gz} ? '-z'
@@ -787,8 +808,6 @@ sub upgradable {
 	return ([], [])
 		unless $rc;
 
-# TODO: upgrades of already installed should also follow dependency order!
-# otherwise, do lib before others
 	my %opt;
 	map(depends(\%opt, $_), @upgrade)
 		if @upgrade;
