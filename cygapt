@@ -12,6 +12,7 @@ use Text::Glob qw(glob_to_regex);
 use POSIX qw(uname);
 use Time::HiRes qw(time sleep);
 use Term::ReadKey;
+use HTTP::Date qw(time2str);
 use Data::Dumper;
 
 # TODO: link last-cache to /var/cache/cygapt??
@@ -1348,6 +1349,11 @@ sub http_get {
 	}
 
 	my $req = HTTP::Request->new(GET => $url);
+	
+	if (-e $file) {
+		my $t = (stat _)[9];
+		$req->header('If-Modified-Since', time2str($t));
+	}
 
 	my $data;
 	my $size = 0;
@@ -1401,6 +1407,12 @@ sub http_get {
 		$http_total_size //= 0;
 		$http_total_size += $total_size // $size;
 		return $total_size // $size;
+	} elsif ($res->code == 304) {
+		# not modified
+		print "Hit:$idx $url\n";
+		unlink("$file.new");
+		$size = -s $file;
+		return $size;
 	} else {
 		print "Err:1 $url\n ", $res->message, "\n";
 		unlink("$file.new");
@@ -1410,6 +1422,8 @@ sub http_get {
 }
 
 sub http_done {
+	return
+		unless $http_total_size;
 	printf "Fetched %s in %ds (%s/s)\n",
 		size2t($http_total_size), $http_end - $http_start,
 		size2t($http_total_size / ($http_end - $http_start));
