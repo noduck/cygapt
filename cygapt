@@ -4,7 +4,7 @@ use strict;
 use warnings;
 use feature qw(:5.20);
 use Getopt::Long qw(:config bundling no_ignore_case);
-use Fcntl qw(:flock SEEK_SET);
+use Fcntl qw(:flock SEEK_SET SEEK_END);
 use LWP;
 use Compress::Zlib;
 use Compress::Bzip2;
@@ -15,13 +15,13 @@ use Term::ReadKey;
 use Data::Dumper;
 
 # TODO: link last-cache to /var/cache/cygapt??
-# TODO: write to a log file (and rotate it if older than today)
 
 use constant {
 	SETUP => "/etc/setup/setup.rc",
 	INSTALLED => "/etc/setup/installed.db",
 	# not using the cache from setup.ini
 	CACHE => "/var/cache/cygapt",
+	LOG => "/var/log/cygapt.log",
 	VERSION => "0.2",
 };
 my (%setup, %package);
@@ -101,6 +101,7 @@ if ($cmd eq 'list') {
 		@ARGV);
 	exit 0;
 } elsif ($cmd eq 'update') {
+	logger("cygapt $cmd @ARGV");
 	if (@ARGV) {
 		print STDERR "E: The update command takes no arguments\n";
 		exit 10;
@@ -108,6 +109,7 @@ if ($cmd eq 'list') {
 	update();
 	exit 0;
 } elsif ($cmd eq 'install') {
+	logger("cygapt $cmd @ARGV");
 	$| = 1;
 	print "Reading package lists... ";
 	get_available();
@@ -132,6 +134,7 @@ if ($cmd eq 'list') {
 		install_deps => \@d,
 	});
 } elsif ($cmd eq 'remove') {
+	logger("cygapt $cmd @ARGV");
 	$| = 1;
 	print "Reading package lists... ";
 	get_available();
@@ -150,6 +153,7 @@ if ($cmd eq 'list') {
 		removes => [ sort { $u->{$b} <=> $u->{$a} } keys %$u ],
 	});
 } elsif ($cmd eq 'upgrade') {
+	logger("cygapt $cmd @ARGV");
 	$| = 1;
 	print "Reading package lists... ";
 	get_available();
@@ -168,6 +172,7 @@ if ($cmd eq 'list') {
 		upgrades => $upgrades,
 	});
 } elsif ($cmd eq 'clean') {
+	logger("cygapt $cmd @ARGV");
 	if (@ARGV) {
 		print STDERR "E: The clean command takes no arguments\n";
 		exit 10;
@@ -175,6 +180,7 @@ if ($cmd eq 'list') {
 	clean();
 	exit 0;
 } elsif ($cmd eq 'autoremove') {
+	logger("cygapt $cmd @ARGV");
 	if (@ARGV) {
 		print STDERR "E: The autoremove command takes no arguments\n";
 		exit 10;
@@ -500,6 +506,7 @@ sub do_install {
 	my ($pack, $vers, $tar, $picked) = @_;
 
 	(my $fname = $tar) =~ s{^.*/}{};
+	logger("unpack $pack $vers");
 	print "Preparing to unpack .../$fname ...\n";
 
 	if ($dryrun) {
@@ -536,6 +543,7 @@ sub do_install {
 	close($tar_fh);
 	$lst_fh->gzclose;
 
+	logger("set up $pack $vers");
 	print "Setting up $pack ($vers) ...\n";
 	for my $post (glob("$root/etc/postinstall/*.sh")) {
 		print "running $post\n"
@@ -557,6 +565,7 @@ sub do_upgrade {
 	my ($pack, $old_vers, $new_vers, $tar) = @_;
 
 	(my $fname = $tar) =~ s{^.*/}{};
+	logger("unpack $pack $new_vers over $old_vers");
 	print "Preparing to unpack .../$fname ...\n";
 
 	if ($dryrun) {
@@ -638,6 +647,7 @@ sub do_upgrade {
 	}
 
 	print "Setting up $pack ($new_vers) ...\n";
+	logger("set up $pack $new_vers");
 	for my $post (glob("$root/etc/postinstall/*.sh")) {
 		print "running $post\n"
 			if $debug;
@@ -658,6 +668,7 @@ sub do_remove {
 	my ($pack) = @_;
 	my $p = $package{$pack};
 
+	logger("removing $pack $p->{v_installed}");
 	print "Removing $pack ($p->{v_installed}) ...\n";
 
 	if ($dryrun) {
@@ -1370,9 +1381,9 @@ sub http_get {
 		} else {
 			$s = size2t($size);
 		}
-# TODO: clear until the end of the line
-		print "[$idx $name $s]\r";
+		print "[$idx $name $s]\e[K\r";
 # TODO: overall progress??
+# 38% [29 package 1024 kB/49.9 MB 0%]                104 MB/s 14s
 	});
 
 	# flush
@@ -1532,6 +1543,31 @@ sub size2t {
 	$t =~ s{$n}{$n2};
 
 	return $t;
+}
+
+sub logger {
+	state $log_fh;
+
+	unless ($log_fh) {
+		if (! -e $root.LOG) {
+			open $log_fh, '>', $root.LOG;
+		} elsif (-s _ > 100_000) {
+			# rotate
+			rename $root.LOG.".3", $root.LOG.".4"; 
+			rename $root.LOG.".2", $root.LOG.".3"; 
+			rename $root.LOG.".1", $root.LOG.".2"; 
+			rename $root.LOG, $root.LOG.".1"; 
+			open $log_fh, '>', $root.LOG;
+		} else {
+			open $log_fh, '+<', $root.LOG;
+		}
+
+		return
+			unless $log_fh;
+		seek $log_fh, 0, SEEK_END;
+	}
+
+	print $log_fh localtime.": ", @_, "\n";
 }
 
 sub usage {
