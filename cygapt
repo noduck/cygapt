@@ -897,6 +897,7 @@ sub list_depends {
 	my ($re, $t_rels, $t_vers) = argv2re(@_);
 
 	for my $pack (sort keys %package) {
+# TODO: if called for install command, should mark any named packages as picked, even if already installed
 		$a = undef;
 		next
 			if $re && $pack !~ $re;
