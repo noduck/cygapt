@@ -70,8 +70,9 @@ if ($cmd eq 'vcmp' && @ARGV == 2) {
 	print "$ARGV[0] ", ($cmp > 0 ? ">" : $cmp < 0 ? "<" : "=="),
 		" $ARGV[1]\n";
 	exit 0;
-} elsif ($cmd !~ /^(?:list|show|install|remove|
-	update|upgrade|clean|autoremove|depends|rdepends)$/x) {
+} elsif ($cmd !~ /^(?:list|show|install|remove
+	|update|upgrade|clean|autoremove|depends|rdepends
+	|search|files|mark-manual|mark-automatic)$/x) {
 	print STDERR "E: Invalid command $cmd\n";
 	exit 10;
 }
@@ -231,6 +232,10 @@ if ($cmd eq 'list') {
 	print "Done\n";
 
 	list_rdepends(@ARGV);
+} elsif ($cmd eq 'files') {
+} elsif ($cmd eq 'search') {
+} elsif ($cmd eq 'mark-manual') {
+} elsif ($cmd eq 'mark-automatic') {
 }
 exit 0;
 
@@ -723,10 +728,10 @@ sub clean {
 }
 
 sub autoremove {
+# TODO: doesn't always complete?
 	my %todo = %package;
 	my %needed;
 	my @remove;
-print "autoremove\n";
 
 	while(keys %todo) {
 PACK:		for my $pack (sort keys %todo) {
@@ -853,9 +858,10 @@ sub upgradable {
 				if $re;
 			next;
 		} elsif ($p->{v_target} eq $p->{v_installed}) {
-			print "$pack is already the newest ",
-				"version ($p->{v_installed})\n"
-				if $re;
+			if ($re) {
+				print "$pack is already the newest ",
+					"version ($p->{v_installed})\n";
+			}
 			next;
 		}
 
@@ -915,6 +921,13 @@ print "Should mark $pack for upgrade!\n";
 		} else {
 			print "$pack is already the newest version ",
 				"($p->{v_installed})\n";
+			if (! $p->{picked}) {
+				$p->{picked} = 1;
+				print "$pack set to manually ",
+					"installed.\n";
+				lock_installed();
+				write_installed();
+			}
 		}
 
 		depends($opt, $pack);
