@@ -12,10 +12,8 @@ use Text::Glob qw(glob_to_regex);
 use POSIX qw(uname);
 use Time::HiRes qw(time sleep);
 use Term::ReadKey;
-use HTTP::Date qw(time2str);
+use HTTP::Date qw(time2str str2time);
 use Data::Dumper;
-
-# TODO: link last-cache to /var/cache/cygapt??
 
 use constant {
 	SETUP => "/etc/setup/setup.rc",
@@ -186,10 +184,18 @@ if ($cmd eq 'list') {
 		print STDERR "E: The autoremove command takes no arguments\n";
 		exit 10;
 	}
-	print STDERR "E: Not implemented yet\n";
-	exit 10;
+
+	$| = 1;
+	print "Reading package lists... ";
+	get_available();
+	print "Done\n";
+	print "Building dependency tree\n";
+	build_tree();
+	print "Reading state information... ";
+	get_installed();
+	print "Done\n";
+
 	autoremove();
-	exit 0;
 } elsif ($cmd eq 'depends') {
 	unless (@ARGV) {
 		print STDERR "E: No packages found\n";
@@ -716,9 +722,55 @@ sub clean {
 		qw(-mindepth 4 -maxdepth 4 -exec rm -r {} ;));
 }
 
+sub autoremove {
+	my %todo = %package;
+	my %needed;
+	my @remove;
+print "autoremove\n";
+
+	while(keys %todo) {
+PACK:		for my $pack (sort keys %todo) {
+			my $p = $package{$pack};
+
+			if (! $p->{v_installed}) {
+				$needed{$pack} = 0;
+				delete $todo{$pack};
+				next;
+			} elsif ($p->{picked}
+				|| ($p->{tag_category} // '') eq 'Base') {
+				$needed{$pack}++;
+				delete $todo{$pack};
+				next;
+			}
+
+			for my $rdep (@{$p->{rdeps}}) {
+				next PACK
+					if exists $todo{$rdep};
+				if ($needed{$rdep}) {
+					$needed{$pack}++;
+					delete $todo{$pack};
+					next PACK;
+				}
+			}
+
+			push @remove, $pack;
+			$needed{$pack} = 0;
+			delete $todo{$pack};
+		}
+	}
+
+print join(" ", sort @remove), "\n";
+}
+
 sub build_tree {
 	for my $p (values %package) {
 		_build_tree($p, 0);
+	}
+
+	# dedup rdeps
+	for my $p (values %package) {
+		my %rd = map { $_ => 1 } @{$p->{rdeps}};
+		$p->{rdeps} = [ keys %rd ];
 	}
 }
 
@@ -776,7 +828,6 @@ sub _build_tree {
 }
 
 sub upgradable {
-# TODO: upgrade of named package should also upgrade all depends!
 	my @arg_found;
 	my ($re, $t_rels, $t_vers) = argv2re(@_);
 
@@ -821,14 +872,15 @@ sub upgradable {
 	return ([], [])
 		unless $rc;
 
-	my %opt;
+	my %opt = ( fullrecurse => ~0, print => 0 );
 	map(depends(\%opt, $_), @upgrade)
 		if @upgrade;
 
-	my $u = $opt{uninstalled_level};
-	return ([ sort { $package{$b}{dep_depth} <=> $package{$a}{dep_depth} }
-			@upgrade ],
-		[ sort { $u->{$b} <=> $u->{$a} } keys %$u ]);
+	my $up = $opt{upgradable_level};
+	my $un = $opt{uninstalled_level};
+	return (#[ sort { $package{$b}{dep_depth} <=> $package{$a}{dep_depth} }
+		[ sort { $up->{$b} <=> $up->{$a} } keys %$up ],
+		[ sort { $un->{$b} <=> $un->{$a} } keys %$un ]);
 }
 
 sub list_depends {
@@ -884,6 +936,7 @@ sub depends {
 	$opt->{recurse} //= ~0;
 	$opt->{fullrecurse} //= 0;
 	$opt->{uninstalled_level} //= { };
+	$opt->{upgradable_level} //= { };
 	my $rc = 1;
 
 	return $rc
@@ -896,8 +949,19 @@ sub depends {
 	$opt->{depends}{$pack}++;
 
 	select_package_versions($p, $opt->{t_rel}, $opt->{t_ver});
+
+	my @t;
+	push @t, 'installed'
+		if $p->{v_installed};
+	if ($p->{v_installed} && $p->{v_target}
+		&& $p->{v_target} ne $p->{v_installed}) {
+		$opt->{upgradable_level}{$pack} = 5000 - $p->{dep_depth};
+		push @t, 'upgradable';
+	}
+
 	print '  ' x $opt->{level}, $pack,
-		$p->{v_installed} ? " [installed]" : "", "\n"
+		@t ? " [".join(",", @t)."]" : "",
+		"\n"
 		if $opt->{print};
 	# recurse until we find an installed version
 	# or if fullrecurse
@@ -906,10 +970,8 @@ sub depends {
 			|| $p->{v_installed}
 				&& $p->{v_installed} eq $p->{v_target})
 		&& $opt->{fullrecurse} <= 0;
-	$opt->{uninstalled_level}{$pack} = $opt->{level}
-		unless $p->{v_installed}
-		|| (exists $opt->{uninstalled_level}{$pack}
-			&& $opt->{uninstalled_level}{$pack} > $opt->{level});
+	$opt->{uninstalled_level}{$pack} = 5000 - $p->{dep_depth}
+		unless $p->{v_installed};
 	unless ($p->{v_target}) {
 		print STDERR "E: no installable version for $pack\n";
 		return 0;
@@ -944,16 +1006,15 @@ sub list_rdepends {
 	my ($re) = argv2re(@_);
 	for my $pack (sort keys %package) {
 		next
-			unless $pack =~ m{$re}
-			&& ! exists $opt->{rdepends}{$pack}
-			&& $package{$pack}{v_installed};
+			unless $pack =~ m{$re};
 		$arg_found[$a]++;
-		my $p = $package{$pack};
+		next
+			unless ! exists $opt->{rdepends}{$pack};
+			#&& $package{$pack}{v_installed};
 
-		print $pack, "\n"
-			if $opt->{print};
-		$opt->{installed_level}{$pack} = $opt->{level};
-		rdepends({ %$opt, level => $opt->{level}+1 }, $pack);
+		$opt->{installed_level}{$pack} = $opt->{level}
+			if $package{$pack}{v_installed};
+		rdepends({ %$opt, level => $opt->{level} }, $pack);
 	}
 
 	my $rc = 1;
@@ -970,6 +1031,18 @@ sub rdepends {
 	my ($opt, $dep) = @_;
 	$opt->{level} //= 0;
 
+	if ($opt->{print}) {
+		my $p = $package{$dep};
+		my @t;
+		push @t, 'installed'
+			if $p->{v_installed};
+		push @t, 'upgradable'
+			if $p->{v_installed} && $p->{v_target}
+			&& $p->{v_target} ne $p->{v_installed};
+		print '  ' x $opt->{level}, "$dep",
+			@t ? " [".join(",", @t)."]" : "", "\n";
+	}
+
 	for my $pack (@{$package{$dep}{rdeps}}) {
 		next
 			if exists $opt->{rdepends}{$pack}
@@ -978,8 +1051,6 @@ sub rdepends {
 		$opt->{rdepends}{$pack} = 1;
 		$opt->{installed_level}{$pack} = $opt->{level};
 
-		print '  ' x $opt->{level}, "$pack\n"
-			if $opt->{print};
 		rdepends({ %$opt, level => $opt->{level}+1 }, $pack);
 	}
 }
@@ -1402,6 +1473,10 @@ sub http_get {
 		unless $http_end && $http_end > $end;
 
 	if ($res->is_success) {
+		if (my $t = $res->header('Last-Modified')) {
+				$t = str2time($t);
+				utime $t, $t, "$file.new";
+		}
 		rename("$file.new", $file);
 		print "Get:$idx $url\n";
 		$http_total_size //= 0;
