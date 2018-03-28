@@ -110,6 +110,11 @@ if ($cmd eq 'list') {
 	exit 0;
 } elsif ($cmd eq 'install') {
 	logger("cygapt $cmd @ARGV");
+	unless (@ARGV) {
+		print STDERR "E: The install should have at least one arguments\n";
+		exit 10;
+	}
+
 	$| = 1;
 	print "Reading package lists... ";
 	get_available();
@@ -135,6 +140,11 @@ if ($cmd eq 'list') {
 	});
 } elsif ($cmd eq 'remove') {
 	logger("cygapt $cmd @ARGV");
+	unless (@ARGV) {
+		print STDERR "E: The remove should have at least one arguments\n";
+		exit 10;
+	}
+
 	$| = 1;
 	print "Reading package lists... ";
 	get_available();
@@ -171,14 +181,6 @@ if ($cmd eq 'list') {
 		upgrade_deps => $new_deps,
 		upgrades => $upgrades,
 	});
-} elsif ($cmd eq 'clean') {
-	logger("cygapt $cmd @ARGV");
-	if (@ARGV) {
-		print STDERR "E: The clean command takes no arguments\n";
-		exit 10;
-	}
-	clean();
-	exit 0;
 } elsif ($cmd eq 'autoremove') {
 	logger("cygapt $cmd @ARGV");
 	if (@ARGV) {
@@ -196,7 +198,16 @@ if ($cmd eq 'list') {
 	get_installed();
 	print "Done\n";
 
-	autoremove();
+	my $rems = autoremove();
+	make_changes({ removes => $rems });
+} elsif ($cmd eq 'clean') {
+	logger("cygapt $cmd @ARGV");
+	if (@ARGV) {
+		print STDERR "E: The clean command takes no arguments\n";
+		exit 10;
+	}
+	clean();
+	exit 0;
 } elsif ($cmd eq 'depends') {
 	unless (@ARGV) {
 		print STDERR "E: No packages found\n";
@@ -734,7 +745,9 @@ sub autoremove {
 	my @remove;
 
 	while(keys %todo) {
-PACK:		for my $pack (sort keys %todo) {
+		my $before_count = scalar keys %todo;
+
+PACK:		for my $pack (keys %todo) {
 			my $p = $package{$pack};
 
 			if (! $p->{v_installed}) {
@@ -762,9 +775,18 @@ PACK:		for my $pack (sort keys %todo) {
 			$needed{$pack} = 0;
 			delete $todo{$pack};
 		}
+
+		if (keys %todo == $before_count) {
+			# looks like a possible dependency loop, mark the first
+			# package as needed, and try again
+			my ($pack) = keys %todo;
+			my $p = $package{$pack};
+			$needed{$pack}++;
+			delete $todo{$pack};
+		}
 	}
 
-print join(" ", sort @remove), "\n";
+	return \@remove;
 }
 
 sub build_tree {
@@ -798,6 +820,7 @@ sub _build_tree {
 	my $max_dep_depth = 0;
 	for my $v (values %{$p->{versions}}) {
 		my @dep;
+# TODO: figure out what the difference is between requires: and depends2:
 		if (exists $v->{tag_depends2}) {
 			@dep = split /,\s*/, $v->{tag_depends2};
 		} elsif (exists $p->{tag_requires}) {
@@ -914,7 +937,7 @@ sub list_depends {
 		$opt->{t_ver} = $t_vers->[$a];
 		select_package_versions($p, $opt->{t_rel}, $opt->{t_ver});
 
-		if (! $p->{v_installed} || ! $p->{v_target}) {
+		if ($opt->{print} || ! $p->{v_installed} || ! $p->{v_target}) {
 		} elsif ($p->{v_installed} ne $p->{v_target}) {
 # TODO: mark $pack for upgrade
 print "Should mark $pack for upgrade!\n";
@@ -930,6 +953,8 @@ print "Should mark $pack for upgrade!\n";
 			}
 		}
 
+		$opt->{depends} = { }
+			if $opt->{print};
 		depends($opt, $pack);
 	}
 
