@@ -403,6 +403,7 @@ sub make_changes {
 	my $uc = @{$changes->{upgrades}};
 	my $rc = @{$changes->{removes}}
 		+ @{$changes->{remove_rdeps}};
+# TODO: should also remove installs or upgrades from the upgrade
 	my $nuc = list({ count_only => 1, upgradable => 1}) - $uc;
 	my $ask;
 
@@ -703,7 +704,9 @@ sub do_remove {
 	if (-f $root.$pre) {
 		print "running $pre\n"
 			if $debug;
-		system($root ? ('chroot', "$root/") : (), $pre);
+		my $rc = system($root ? ('chroot', "$root/") : (), $pre);
+		rename($root.$pre, "$root$pre.todo")
+			if $rc;
 	}
 
 	my $lst_fh;
@@ -755,20 +758,28 @@ PACK:		for my $pack (keys %todo) {
 				delete $todo{$pack};
 				next;
 			} elsif ($p->{picked}
-				|| ($p->{tag_category} // '') eq 'Base') {
+				|| ($p->{tag_category} // '')
+					=~ /(?:^|\s)Base(?:\s|$)/) {
 				$needed{$pack}++;
 				delete $todo{$pack};
 				next;
 			}
 
+			# if at least one rdep is needed, then this pack
+			# is also needed
 			for my $rdep (@{$p->{rdeps}}) {
-				next PACK
-					if exists $todo{$rdep};
-				if ($needed{$rdep}) {
+				if (! exists $todo{$rdep} && $needed{$rdep}) {
 					$needed{$pack}++;
 					delete $todo{$pack};
 					next PACK;
 				}
+			}
+
+			# only if all rdeps are not needed is this pack
+			# not needed
+			for my $rdep (@{$p->{rdeps}}) {
+				next PACK
+					if exists $todo{$rdep};
 			}
 
 			push @remove, $pack;
@@ -779,6 +790,14 @@ PACK:		for my $pack (keys %todo) {
 		if (keys %todo == $before_count) {
 			# looks like a possible dependency loop, mark the first
 			# package as needed, and try again
+for my $pack (sort keys %todo) {
+	print "$pack\n";
+	my $p = $package{$pack};
+	for my $rdep (@{$p->{rdeps}}) {
+		print "\t$rdep: $needed{$rdep}\n";
+	}
+}
+
 			my ($pack) = keys %todo;
 			my $p = $package{$pack};
 			$needed{$pack}++;
@@ -830,22 +849,21 @@ sub _build_tree {
 
 		print "\t$p->{name} $v->{version}: @dep\n"
 			if $debug > 2;
-		if (@dep) {
-			for my $d (@dep) {
-				unless (exists $package{$d}) {
-					print "unsatisfied dep from ",
-						"$p->{name} to $d\n"
-						if $debug;
-					$max_dep_depth = -10_000;
-					last;
-				}
-				my $rd = $package{$d};
-				push @{$rd->{rdeps}}, $p->{name};
-				_build_tree($rd, $n+1);
-				$max_dep_depth = $rd->{dep_depth} + 1
-					unless $max_dep_depth
-						> $rd->{dep_depth} + 1;
+
+		for my $d (@dep) {
+			unless (exists $package{$d}) {
+				print "unsatisfied dep from ",
+					"$p->{name} to $d\n"
+					if $debug;
+				$max_dep_depth = -10_000;
+				last;
 			}
+			my $rd = $package{$d};
+			push @{$rd->{rdeps}}, $p->{name};
+			_build_tree($rd, $n+1);
+			$max_dep_depth = $rd->{dep_depth} + 1
+				unless $max_dep_depth
+					> $rd->{dep_depth} + 1;
 		}
 	}
 
@@ -938,12 +956,15 @@ sub list_depends {
 		select_package_versions($p, $opt->{t_rel}, $opt->{t_ver});
 
 		if ($opt->{print} || ! $p->{v_installed} || ! $p->{v_target}) {
-		} elsif ($p->{v_installed} ne $p->{v_target}) {
+		} else {
+			if ($p->{v_installed} ne $p->{v_target}) {
 # TODO: mark $pack for upgrade
 print "Should mark $pack for upgrade!\n";
-		} else {
-			print "$pack is already the newest version ",
-				"($p->{v_installed})\n";
+			} else {
+				print "$pack is already the newest version ",
+					"($p->{v_installed})\n";
+			}
+
 			if (! $p->{picked}) {
 				$p->{picked} = 1;
 				print "$pack set to manually ",
@@ -1511,6 +1532,7 @@ sub http_get {
 	$http_end = $end
 		unless $http_end && $http_end > $end;
 
+# TODO: should check hash of downloaded file vs. setup.ini
 	if ($res->is_success) {
 		if (my $t = $res->header('Last-Modified')) {
 				$t = str2time($t);
