@@ -8,7 +8,6 @@ use Fcntl qw(:flock SEEK_SET SEEK_END);
 use LWP;
 use Compress::Zlib;
 use Compress::Bzip2;
-use Text::Glob qw(glob_to_regex);
 use POSIX qw(uname);
 use Time::HiRes qw(time sleep);
 use Term::ReadKey;
@@ -28,7 +27,8 @@ my (%setup, %package);
 my @field = (qw(sdesc ldesc category requires version depends2));
 
 my ($installed, $upgradable, $allversions, $target_release, $downgrades, $yes,
-	$downloadonly, $purge, $dryrun, $recurse, $fullrecurse, $verbose);
+	$downloadonly, $reinstall, $purge, $dryrun, $recurse, $fullrecurse,
+	$verbose);
 my $debug = 0;
 my $root = '';
 GetOptions(
@@ -39,6 +39,7 @@ GetOptions(
 	"downgrades|allow-downgrades" => \$downgrades,
 	"y|yes"		=> \$yes,
 	"d|download-only" => \$downloadonly,
+	"reinstall"	=> \$reinstall,
 	"purge"		=> \$purge,
 	"s|simulate|n|dry-run" => \$dryrun,
 	"r|recurse"	=> \$recurse,
@@ -1048,19 +1049,21 @@ sub depends {
 
 	select_package_versions($p, $opt->{t_rel}, $opt->{t_ver});
 
-	my @t;
-	push @t, 'installed'
-		if $p->{v_installed};
-	if ($p->{v_installed} && $p->{v_target}
-		&& $p->{v_target} ne $p->{v_installed}) {
-		$opt->{upgradable_level}{$pack} = 5000 - $p->{dep_depth};
-		push @t, 'upgradable';
+	if ($opt->{print}) {
+		my @t;
+		push @t, 'installed'
+			if $p->{v_installed};
+		if ($p->{v_installed} && $p->{v_target}
+			&& $p->{v_target} ne $p->{v_installed}) {
+			$opt->{upgradable_level}{$pack} = 999 - $p->{dep_depth};
+			push @t, 'upgradable';
+		}
+
+		print '  ' x $opt->{level}, $pack,
+			@t ? " [".join(",", @t)."]" : "",
+			"\n"
 	}
 
-	print '  ' x $opt->{level}, $pack,
-		@t ? " [".join(",", @t)."]" : "",
-		"\n"
-		if $opt->{print};
 	# recurse until we find an installed version
 	# or if fullrecurse
 	return $rc
@@ -1069,7 +1072,7 @@ sub depends {
 				&& $p->{v_installed} eq $p->{v_target})
 		&& $opt->{fullrecurse} <= 0;
 	$opt->{uninstalled_level}{$pack} = 5000 - $p->{dep_depth}
-		unless $p->{v_installed};
+		unless $p->{v_installed} && ! $reinstall;
 	unless ($p->{v_target}) {
 		print STDERR "E: no installable version for $pack\n";
 		return 0;
@@ -1158,7 +1161,7 @@ sub search {
 
 sub find {
 	my @arg_found;
-	my $re = argv2pack(map {
+	my $re = argv2re(map {
 		# drop first slash
 		my $a = $_;
 		$a = "*$a"
@@ -1177,13 +1180,11 @@ sub find {
 			my $line;
 			my $cnt = 0;
 			while($lst_fh->gzreadline($line)) {
-print "DASH:\n$line\nSEARCH: $re\n"
-	if $pack eq 'dash';
-				while($line =~ $re) {
+				if ($line =~ $re) {
 					$arg_found[$a]++;
 					print "$pack:\n"
 						unless $cnt;
-					print "\t$line";
+					print "\t/$line";
 					$cnt++;
 				}
 			}
@@ -1796,13 +1797,13 @@ sub vacmp {
 	}
 }
 
-sub argv2pack {
+sub argv2re {
 	return undef
 		unless @_;
 
 	my @re;
 	for (@_) {
-		push @re, glob2re($_)."(?{ \$a = ".scalar(@re)." })";
+		push @re, glob2re("^$_\$")."(?{ \$a = ".scalar(@re)." })";
 	}
 
 	my $re;
@@ -1831,10 +1832,10 @@ sub argv2pack_re {
 		print STDERR "W: Only select target version or release: $_\n"
 			if m{/} && m{=};
 
- 		push @t_rel, s{/(\S+)$}{} ? glob_to_regex($1) : $target_release;
-		push @t_ver, s{=(\S+)$}{} ? glob_to_regex($1) : undef;
+ 		push @t_rel, s{/(\S+)$}{} ? glob2re("^$1\$") : $target_release;
+		push @t_ver, s{=(\S+)$}{} ? glob2re("^$1\$") : undef;
 
-		push @re, glob_to_regex($_)."(?{ \$a = ".scalar(@re)." })";
+		push @re, glob2re("^$_\$")."(?{ \$a = ".scalar(@re)." })";
 	}
 
 	my $re;
@@ -1849,7 +1850,12 @@ sub argv2pack_re {
 
 sub glob2re {
 	my ($re) = @_;
-	$re = glob_to_regex($re);
+
+	$re =~ s{([.+])}{\\$1}g;
+	$re =~ s{\*}{.*}g;
+	$re =~ s{\?}{.}g;
+	$re =~ s[{([^}]*)]["(?:".join("|", split(/,/, $1)).")"]ge;
+	
 	return qr{$re};
 }
 
