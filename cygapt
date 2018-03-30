@@ -72,7 +72,7 @@ if ($cmd eq 'vcmp' && @ARGV == 2) {
 	exit 0;
 } elsif ($cmd !~ /^(?:list|show|install|remove
 	|update|upgrade|clean|autoremove|depends|rdepends
-	|search|files|mark-manual|mark-automatic)$/x) {
+	|search|find|files|mark-manual|mark-automatic)$/x) {
 	print STDERR "E: Invalid command $cmd\n";
 	exit 10;
 }
@@ -243,10 +243,55 @@ if ($cmd eq 'list') {
 	print "Done\n";
 
 	list_rdepends(@ARGV);
-} elsif ($cmd eq 'files') {
 } elsif ($cmd eq 'search') {
+} elsif ($cmd eq 'find') {
+	unless (@ARGV) {
+		print STDERR "E: No files provided\n";
+		exit 10;
+	}
+
+	$| = 1;
+	print "Reading state information... ";
+	get_installed();
+	print "Done\n";
+
+	find(@ARGV);
+} elsif ($cmd eq 'files') {
+	unless (@ARGV) {
+		print STDERR "E: No packages provided\n";
+		exit 10;
+	}
+
+	$| = 1;
+	print "Reading state information... ";
+	get_installed();
+	print "Done\n";
+
+	files(@ARGV);
 } elsif ($cmd eq 'mark-manual') {
+	unless (@ARGV) {
+		print STDERR "E: No packages provided\n";
+		exit 10;
+	}
+
+	$| = 1;
+	print "Reading state information... ";
+	get_installed();
+	print "Done\n";
+
+	mark(1, @ARGV);
 } elsif ($cmd eq 'mark-automatic') {
+	unless (@ARGV) {
+		print STDERR "E: No packages provided\n";
+		exit 10;
+	}
+
+	$| = 1;
+	print "Reading state information... ";
+	get_installed();
+	print "Done\n";
+
+	mark(0, @ARGV);
 }
 exit 0;
 
@@ -255,7 +300,7 @@ sub list {
 	$opt = shift @_
 		if @_ && ref $_[0] eq 'HASH';
 
-	my ($re, $t_rels, $t_vers) = argv2re(@_);
+	my ($re, $t_rels, $t_vers) = argv2pack_re(@_);
 
 	my $count = 0;
 	for my $pack (sort keys %package) {
@@ -317,7 +362,7 @@ sub list {
 
 				print "status: ",
 					$p->{picked} ? "manually installed"
-						: "system installed",
+						: "automatically installed",
 					"\n"
 					if $opt->{all} && $v->{installed}
 					|| ! $opt->{all} && $p->{v_installed};
@@ -790,14 +835,7 @@ PACK:		for my $pack (keys %todo) {
 		if (keys %todo == $before_count) {
 			# looks like a possible dependency loop, mark the first
 			# package as needed, and try again
-for my $pack (sort keys %todo) {
-	print "$pack\n";
-	my $p = $package{$pack};
-	for my $rdep (@{$p->{rdeps}}) {
-		print "\t$rdep: $needed{$rdep}\n";
-	}
-}
-
+			print STDERR "W: breaking dependency loop\n";
 			my ($pack) = keys %todo;
 			my $p = $package{$pack};
 			$needed{$pack}++;
@@ -875,7 +913,7 @@ sub _build_tree {
 
 sub upgradable {
 	my @arg_found;
-	my ($re, $t_rels, $t_vers) = argv2re(@_);
+	my ($re, $t_rels, $t_vers) = argv2pack_re(@_);
 
 	my @upgrade;
 	for my $pack (keys %package) {
@@ -941,7 +979,7 @@ sub list_depends {
 	$opt->{uninstalled_level} //= { };
 
 	my @arg_found;
-	my ($re, $t_rels, $t_vers) = argv2re(@_);
+	my ($re, $t_rels, $t_vers) = argv2pack_re(@_);
 
 	for my $pack (sort keys %package) {
 # TODO: if called for install command, should mark any named packages as picked, even if already installed
@@ -1063,7 +1101,7 @@ sub list_rdepends {
 	$opt->{installed_level} //= { };
 
 	my @arg_found;
-	my ($re) = argv2re(@_);
+	my ($re) = argv2pack_re(@_);
 	for my $pack (sort keys %package) {
 		next
 			unless $pack =~ m{$re};
@@ -1113,6 +1151,140 @@ sub rdepends {
 
 		rdepends({ %$opt, level => $opt->{level}+1 }, $pack);
 	}
+}
+
+sub search {
+}
+
+sub find {
+	my @arg_found;
+	my $re = argv2pack(map {
+		# drop first slash
+		my $a = $_;
+		$a = "*$a"
+			unless $a =~ s{^/+}{};
+		$a;
+	} @_);
+
+	for my $pack (sort keys %package) {
+		my $p = $package{$pack};
+		next
+			unless $p->{v_installed};
+
+		my $lst_fh;
+		my $lst_name = "$root/etc/setup/$pack.lst.gz";
+		if ($lst_fh = gzopen($lst_name, 'rb')) {
+			my $line;
+			my $cnt = 0;
+			while($lst_fh->gzreadline($line)) {
+print "DASH:\n$line\nSEARCH: $re\n"
+	if $pack eq 'dash';
+				while($line =~ $re) {
+					$arg_found[$a]++;
+					print "$pack:\n"
+						unless $cnt;
+					print "\t$line";
+					$cnt++;
+				}
+			}
+			$lst_fh->gzclose;
+
+
+		} else {
+			print STDERR "W: Cannot read $lst_name: $!\n";
+		}
+	}
+
+	my $rc = 1;
+	for my $i (0..$#_) {
+		next
+			if $arg_found[$i];
+		print STDERR "E: Found no package containing files ",
+			"like $_[$i]\n";
+		$rc = 0;
+	}
+	return $rc;
+}
+
+sub files {
+	my @arg_found;
+	my ($re, $t_rels, $t_vers) = argv2pack_re({ installed => 1 }, @_);
+
+	for my $pack (sort keys %package) {
+		$a = undef;
+		next
+			if $re && $pack !~ $re;
+		$arg_found[$a]++;
+
+		my $p = $package{$pack};
+		unless ($p->{v_installed}) {
+			print "$pack is not yet installed\n";
+			next;
+		}
+
+		print "$pack:\n";
+		my $lst_fh;
+		my $lst_name = "$root/etc/setup/$pack.lst.gz";
+		if ($lst_fh = gzopen($lst_name, 'rb')) {
+			my $line;
+			while($lst_fh->gzreadline($line)) {
+				print "\t$line";
+			}
+			$lst_fh->gzclose;
+		} else {
+			print STDERR "W: Cannot read $lst_name: $!\n";
+		}
+	}
+
+	my $rc = 1;
+	for my $i (0..$#_) {
+		next
+			if $arg_found[$i];
+		print STDERR "E: Unable to locate installed package $_[$i]\n";
+		$rc = 0;
+	}
+	return $rc;
+}
+
+sub mark {
+	my $picked = shift;
+	my @arg_found;
+	my ($re, $t_rels, $t_vers) = argv2pack_re({ installed => 1 }, @_);
+
+	lock_installed();
+	for my $pack (sort keys %package) {
+		$a = undef;
+		next
+			if $re && $pack !~ $re;
+		$arg_found[$a]++;
+
+		my $p = $package{$pack};
+		unless ($p->{v_installed}) {
+			print "$pack is not yet installed\n";
+			next;
+		}
+
+		if ($p->{picked} != $picked) {
+			$p->{picked} = $picked;
+			print "$pack set to ",
+				$picked ? "manually" : "automtically",
+				" installed.\n";
+			write_installed();
+		} else {
+			print "$pack already set to ",
+				$picked ? "manually" : "automtically",
+				" installed.\n";
+		}
+	}
+
+	my $rc = 1;
+	for my $i (0..$#_) {
+		next
+			if $arg_found[$i];
+		print STDERR "E: Unable to locate installed package $_[$i]\n";
+		$rc = 0;
+	}
+	return $rc;
 }
 
 sub get_setup {
@@ -1229,6 +1401,11 @@ sub lock_installed {
 	return
 		if $installed_fh;
 
+	unless (keys %package) {
+		print STDERR "E: Refusing to write empty installed.db!\n";
+		exit 10;
+	}
+
 	rename($root.INSTALLED, $root.INSTALLED.".orig");
 	unless (open $installed_fh, '+>', $root.INSTALLED) {
 		print STDERR "E: Cannot open ", $root.INSTALLED, ": $!\n";
@@ -1254,7 +1431,6 @@ sub write_installed {
 	$SIG{QUIT} = $SIG{INT};
 
 	seek($installed_fh, 0, SEEK_SET);
-
 	print $installed_fh "INSTALLED.DB 3\n";
 	for my $pack (sort keys %package) {
 		my $p = $package{$pack};
@@ -1276,6 +1452,7 @@ sub write_installed {
 
 		print $installed_fh "$pack $file $p->{picked}\n";
 	}
+
 	truncate($installed_fh, tell($installed_fh));
 
 	if ($debug > 1) {
@@ -1619,7 +1796,26 @@ sub vacmp {
 	}
 }
 
-sub argv2re {
+sub argv2pack {
+	return undef
+		unless @_;
+
+	my @re;
+	for (@_) {
+		push @re, glob2re($_)."(?{ \$a = ".scalar(@re)." })";
+	}
+
+	my $re;
+	use re 'eval';
+	$re = join('|', @re);
+	$re = qr/(?:$re)/;
+	print STDERR "Match: $re\n"
+		if $debug;
+
+	return $re;
+}
+
+sub argv2pack_re {
 	return (undef, [], [])
 		unless @_;
 
@@ -1635,10 +1831,10 @@ sub argv2re {
 		print STDERR "W: Only select target version or release: $_\n"
 			if m{/} && m{=};
 
- 		push @t_rel, s{/(\S+)$}{} ? glob2re($1) : $target_release;
-		push @t_ver, s{=(\S+)$}{} ? glob2re($1) : undef;
+ 		push @t_rel, s{/(\S+)$}{} ? glob_to_regex($1) : $target_release;
+		push @t_ver, s{=(\S+)$}{} ? glob_to_regex($1) : undef;
 
-		push @re, glob2re($_)."(?{ \$a = ".scalar(@re)." })";
+		push @re, glob_to_regex($_)."(?{ \$a = ".scalar(@re)." })";
 	}
 
 	my $re;
