@@ -1038,7 +1038,6 @@ sub clean {
 }
 
 sub autoremove {
-# TODO: doesn't always complete?
 	my %todo = %package;
 	my %needed;
 	my @remove;
