@@ -26,275 +26,525 @@ my (%setup, %package);
 # fields in order (not showing install and source)
 my @field = (qw(sdesc ldesc category requires version depends2));
 
-my ($installed, $upgradable, $allversions, $target_release, $downgrades, $yes,
-	$downloadonly, $reinstall, $purge, $dryrun, $recurse, $fullrecurse,
-	$verbose);
+my ($dryrun, $verbose, $help);
 my $debug = 0;
 my $root = '';
-GetOptions(
-	"i|installed"	=> \$installed,
-	"u|upgradable|upgradeable" => \$upgradable,
-	"a|all-versions" => \$allversions,
-	"t|target=s"	=> \$target_release,
-	"downgrades|allow-downgrades" => \$downgrades,
-	"y|yes"		=> \$yes,
-	"d|download-only" => \$downloadonly,
-	"reinstall"	=> \$reinstall,
-	"purge"		=> \$purge,
+
+my %common_opt = (
 	"s|simulate|n|dry-run" => \$dryrun,
-	"r|recurse"	=> \$recurse,
-	"full-recurse"	=> \$fullrecurse,
 	"v|verbose"	=> \$verbose,
 	"D|debug:+"	=> \$debug,
-	"h|help"	=> sub { usage() },
+	"h|help"	=> \$help,
 	"root=s"	=> \$root,
-) or usage("");
+);
 
+my ($installed, $upgradable, $allversions, $target_release, $downgrades, $yes,
+	$downloadonly, $reinstall, $purge, $recurse, $fullrecurse);
+
+my @command = (
+	list => {
+		opts => {
+			"i|installed"	=> \$installed,
+			"u|upgradable|upgradeable" => \$upgradable,
+			"a|all-versions" => \$allversions,
+			"t|target=s"	=> \$target_release,
+			"downgrades|allow-downgrades" => \$downgrades,
+		},
+		help => <<HELP,
+Usage: cygapt [options] list {package{=version|/release}}...
+
+list all packages based on package names
+
+Options for list:
+  -i, --installed	only list installed packages
+  -u, --upgradable	only list upgradable packages
+  -a, --all-versions	list all available versions
+  -t, --target=RELEASE	select version from this RELEASE
+  --allow-downgrades	allow selecting versions before the installed version
+HELP
+		sub => sub {
+			$| = 1;
+			print "Listing... ";
+			get_available();
+			get_installed();
+			print "Done\n";
+			list({ upgradable => $upgradable,
+				installed => $installed,
+				all => $allversions },
+				@_);
+		},
+	},
+
+
+	show => {
+		opts => {
+			"i|installed"	=> \$installed,
+			"u|upgradable|upgradeable" => \$upgradable,
+			"a|all-versions" => \$allversions,
+			"t|target=s"	=> \$target_release,
+			"downgrades|allow-downgrades" => \$downgrades,
+		},
+		help => <<HELP,
+Usage: cygapt [options] show package{=version|/release}...
+
+show package details
+
+Options for show:
+  -i, --installed	only show installed packages
+  -u, --upgradable	only show upgradable packages
+  -a, --all-versions	show all available versions
+  -t, --target=RELEASE	select version from this RELEASE
+  --allow-downgrades	allow selecting versions before the installed version
+HELP
+		sub => sub {
+			unless (@ARGV) {
+				print STDERR "E: No packages found\n";
+				exit 10;
+			}
+			get_installed();
+			get_available();
+			list({ show => 1, upgradable => $upgradable,
+				installed => $installed,
+				all => $allversions},
+				@_);
+		},
+	},
+
+
+	update => {
+		help => <<HELP,
+Usage: cygapt [options] update
+
+update list of available packages
+HELP
+		sub => sub {
+			if (@ARGV) {
+				print STDERR "E: The update command ",
+					"takes no arguments\n";
+				exit 10;
+			}
+			update();
+		},
+	},
+
+
+	upgrade => {
+		opts => {
+			"t|target=s"	=> \$target_release,
+			"downgrades|allow-downgrades" => \$downgrades,
+			"y|yes"		=> \$yes,
+			"d|download-only" => \$downloadonly,
+		},
+		help => <<HELP,
+Usage: cygapt [options] upgrade {package{=version|/release}}...
+
+upgrade the system by installed/upgrading packages
+
+Options for upgrade:
+  -t, --target=RELEASE	select version from this RELEASE
+  --allow-downgrades	allow selecting versions before the installed version
+  -y, --yes		assume yes answer
+  -d, --download-only	only download packages, do not upgrade
+HELP
+		sub => sub {
+			$| = 1;
+			print "Reading package lists... ";
+			get_available();
+			print "Done\n";
+			print "Building dependency tree\n";
+			build_tree();
+			print "Reading state information... ";
+			get_installed();
+			print "Done\n";
+
+			my ($upgrades, $new_deps) = upgradable(@ARGV);
+			print "Calculating upgrade... Done\n";
+
+			make_changes({
+				upgrade_deps => $new_deps,
+				upgrades => $upgrades,
+			});
+		},
+	},
+
+
+	install => {
+		opts => {
+			"t|target=s"	=> \$target_release,
+			"downgrades|allow-downgrades" => \$downgrades,
+			"y|yes"		=> \$yes,
+			"d|download-only" => \$downloadonly,
+			"reinstall"	=> \$reinstall,
+		},
+		help => <<HELP,
+Usage: cygapt [options] install package{=version|/release}...
+
+install packages
+
+Options for install:
+  -t, --target=RELEASE	select version from this RELEASE
+  --allow-downgrades	allow selecting versions before the installed version
+  -y, --yes		assume yes answer
+  -d, --download-only	only download packages, do not install
+  --reinstall		reinstall package, even if already installed
+HELP
+		sub => sub {
+			unless (@ARGV) {
+				print STDERR "E: The install command ",
+					"should have at least one arguments\n";
+				exit 10;
+			}
+
+			$| = 1;
+			print "Reading package lists... ";
+			get_available();
+			print "Done\n";
+			print "Building dependency tree\n";
+			build_tree();
+			print "Reading state information... ";
+			get_installed();
+			print "Done\n";
+
+			my $opt = { print => 0 };
+			exit 10
+				unless list_depends($opt, @ARGV);
+
+			my $uls = $opt->{uninstalled_level};
+			my @i = grep ! $uls->{$_}, keys %$uls;
+			my @d = sort { $uls->{$b} <=> $uls->{$a} }
+				grep $uls->{$_}, keys %$uls;
+
+			make_changes({
+				installs => \@i,
+				install_deps => \@d,
+			});
+		},
+	},
+
+
+	remove => {
+		opts => {
+			"y|yes"		=> \$yes,
+		},
+		help => <<HELP,
+Usage: cygapt [options] remove package...
+
+remove packages
+
+Options for remove:
+  -y, --yes		assume yes answer
+HELP
+		sub => sub {
+			unless (@ARGV) {
+				print STDERR "E: The remove command ",
+					"should have at least one arguments\n";
+				exit 10;
+			}
+
+			$| = 1;
+			print "Reading package lists... ";
+			get_available();
+			print "Done\n";
+			print "Building dependency tree\n";
+			build_tree();
+			print "Reading state information... ";
+			get_installed();
+			print "Done\n";
+
+			my $opt = { print => 0 };
+			exit 10
+				unless list_rdepends($opt, @ARGV);
+			my $u = $opt->{installed_level};
+			make_changes({
+				removes => [ sort { $u->{$b} <=> $u->{$a} }
+					keys %$u ],
+			});
+		},
+	},
+
+
+	autoremove => {
+		help => <<HELP,
+Usage: cygapt [options] autoremove
+
+remove all unused packages
+HELP
+		sub => sub {
+			if (@ARGV) {
+				print STDERR "E: The autoremove command ",
+					"takes no arguments\n";
+				exit 10;
+			}
+
+			$| = 1;
+			print "Reading package lists... ";
+			get_available();
+			print "Done\n";
+			print "Building dependency tree\n";
+			build_tree();
+			print "Reading state information... ";
+			get_installed();
+			print "Done\n";
+
+			my $rems = autoremove();
+			make_changes({ removes => $rems });
+		},
+	},
+
+
+	clean => {
+		help => <<HELP,
+Usage: cygapt [options] clean
+
+clears out the local copy of downloaded package files
+HELP
+		sub => sub {
+			if (@ARGV) {
+				print STDERR "E: The clean command ",
+					"takes no arguments\n";
+				exit 10;
+			}
+			clean();
+		},
+	},
+
+
+	depends => {
+		opts => {
+			"r|recurse"	=> \$recurse,
+			"full-recurse"	=> \$fullrecurse,
+		},
+		help => <<HELP,
+Usage: cygopt [options] depends package{=version|/release}...
+
+list dependencies of packages
+
+Options for depends:
+  -r, --recurse		recurse into dependencies until an installed package
+  --full-recurse	recurse through all dependencies
+HELP
+		sub => sub {
+			unless (@ARGV) {
+				print STDERR "E: No packages found\n";
+				exit 10;
+			}
+			$| = 1;
+			print "Reading package lists... ";
+			get_available();
+			print "Done\n";
+			print "Building dependency tree\n";
+			build_tree();
+			print "Reading state information... ";
+			get_installed();
+			print "Done\n";
+
+			list_depends({
+					recurse => $recurse ? ~0 : 1,
+					fullrecurse => $fullrecurse ? ~0 : 1,
+				},@ARGV);
+		},
+	},
+
+
+	rdepends => {
+		help => <<HELP,
+Usage: cygopt [options] rdepends package...
+
+list reverse dependencies of packages
+
+Options for rdepends:
+HELP
+		sub => sub {
+			unless (@ARGV) {
+				print STDERR "E: No packages found\n";
+				exit 10;
+			}
+			$| = 1;
+			print "Reading package lists... ";
+			get_available();
+			print "Done\n";
+			print "Building dependency tree\n";
+			build_tree();
+			print "Reading state information... ";
+			get_installed();
+			print "Done\n";
+
+			list_rdepends(@ARGV);
+		},
+	},
+
+
+	search => {
+		help => <<HELP,
+Usage: cygapt [options] search words
+
+search package descriptions for the words
+HELP
+		sub => sub {
+		},
+	},
+
+
+	find => {
+		help => <<HELP,
+Usage: cygapt [options] find file...
+
+find the packages that contain the file
+HELP
+		sub => sub {
+			unless (@ARGV) {
+				print STDERR "E: No files provided\n";
+				exit 10;
+			}
+
+			$| = 1;
+			print "Reading state information... ";
+			get_installed();
+			print "Done\n";
+
+			find(@ARGV);
+		},
+	},
+
+
+	files => {
+		help => <<HELP,
+Usage: cygapt [options] files package...
+
+list the files that belong to the packages
+HELP
+		sub => sub {
+			unless (@ARGV) {
+				print STDERR "E: No packages provided\n";
+				exit 10;
+			}
+
+			$| = 1;
+			print "Reading state information... ";
+			get_installed();
+			print "Done\n";
+
+			files(@ARGV);
+		},
+	},
+
+
+	mark_manual => {
+		help => <<HELP,
+Usage: cygapt [options] mark-manual package...
+
+mark the packages as manually installed
+HELP
+		sub => sub {
+			unless (@ARGV) {
+				print STDERR "E: No packages provided\n";
+				exit 10;
+			}
+
+			$| = 1;
+			print "Reading state information... ";
+			get_installed();
+			print "Done\n";
+
+			mark(1, @ARGV);
+		},
+	},
+
+
+	mark_automatic => {
+		help => <<HELP,
+Usage: cygapt [options] mark-automatic package...
+
+mark the packages as automatically installed
+HELP
+		sub => sub {
+			unless (@ARGV) {
+				print STDERR "E: No packages provided\n";
+				exit 10;
+			}
+
+			$| = 1;
+			print "Reading state information... ";
+			get_installed();
+			print "Done\n";
+
+			mark(0, @ARGV);
+		},
+	},
+
+
+	vcmp => {
+		sub => sub {
+			my $a = v2va($ARGV[0]);
+			my $b = v2va($ARGV[1]);
+			my $cmp = vacmp($a, $b);
+			print "$ARGV[0] ",
+				($cmp > 0 ? ">" : $cmp < 0 ? "<" : "=="),
+				" $ARGV[1]\n";
+		},
+	},
+);
+my %command = @command;
+
+my %all_opts = %common_opt;
+for my $c (values %command) {
+	while (my ($k, $v) = each %{$c->{opts}}) {
+		$all_opts{$k} = $v;
+	}
+}
+
+# ignore all opts and find command
+my $cmd;
+do {
+	local @ARGV = @ARGV;
+	GetOptions(%all_opts) or usage("");
+	$cmd = shift @ARGV;
+};
+usage($help ? () : "")
+	unless $cmd;
+$cmd =~ s/-/_/g;
+unless (exists $command{$cmd}) {
+	if ($cmd eq 'help') {
+		$cmd = $ARGV[1];
+		$cmd =~ s/-/_/g;
+		if ($cmd) {
+			usage_cmd($cmd);
+		} else {
+			usage();
+		}
+	}
+
+
+	print STDERR "E: Invalid command $cmd\n";
+	exit 10;
+}
+usage_cmd($cmd)
+	if $help;
+
+# parse opts for the command (using original ARGV)
+$debug = 0;
+GetOptions(%common_opt, %{$command{$cmd}{opts}})
+	or usage_cmd($cmd, "");
+
+# initialize
 if (! $root) {
 } elsif (! -d $root) {
 	print STDERR "E: root directory $root is not accessible: $!\n";
 	exit 10;
 } elsif ($root =~ s{/+$}{}) {
 }
-
 $target_release = glob2re($target_release)
 	if $target_release;
-
-usage()
-	unless @ARGV;
-my $cmd = shift @ARGV;
-
-if ($cmd eq 'vcmp' && @ARGV == 2) {
-	my $a = v2va($ARGV[0]);
-	my $b = v2va($ARGV[1]);
-	my $cmp = vacmp($a, $b);
-	print "$ARGV[0] ", ($cmp > 0 ? ">" : $cmp < 0 ? "<" : "=="),
-		" $ARGV[1]\n";
-	exit 0;
-} elsif ($cmd !~ /^(?:list|show|install|remove
-	|update|upgrade|clean|autoremove|depends|rdepends
-	|search|find|files|mark-manual|mark-automatic)$/x) {
-	print STDERR "E: Invalid command $cmd\n";
-	exit 10;
-}
-
 get_setup();
 
-if ($cmd eq 'list') {
-	$| = 1;
-	print "Listing... ";
-	get_available();
-	get_installed();
-	print "Done\n";
-	list({ upgradable => $upgradable, installed => $installed,
-		all => $allversions },
-		@ARGV);
-	exit 0;
-} elsif ($cmd eq 'show') {
-	unless (@ARGV) {
-		print STDERR "E: No packages found\n";
-		exit 10;
-	}
-	get_installed();
-	get_available();
-	list({ show => 1, upgradable => $upgradable, installed => $installed,
-		all => $allversions},
-		@ARGV);
-	exit 0;
-} elsif ($cmd eq 'update') {
-	logger("cygapt $cmd @ARGV");
-	if (@ARGV) {
-		print STDERR "E: The update command takes no arguments\n";
-		exit 10;
-	}
-	update();
-	exit 0;
-} elsif ($cmd eq 'install') {
-	logger("cygapt $cmd @ARGV");
-	unless (@ARGV) {
-		print STDERR "E: The install should have at least one arguments\n";
-		exit 10;
-	}
+# execute command
+shift @ARGV;
+logger("cygapt $cmd @ARGV");
+$command{$cmd}{sub}->(@ARGV);
 
-	$| = 1;
-	print "Reading package lists... ";
-	get_available();
-	print "Done\n";
-	print "Building dependency tree\n";
-	build_tree();
-	print "Reading state information... ";
-	get_installed();
-	print "Done\n";
-
-	my $opt = { print => 0 };
-	exit 10
-		unless list_depends($opt, @ARGV);
-
-	my $uls = $opt->{uninstalled_level};
-	my @i = grep ! $uls->{$_}, keys %$uls;
-	my @d = sort { $uls->{$b} <=> $uls->{$a} }
-		grep $uls->{$_}, keys %$uls;
-
-	make_changes({
-		installs => \@i,
-		install_deps => \@d,
-	});
-} elsif ($cmd eq 'remove') {
-	logger("cygapt $cmd @ARGV");
-	unless (@ARGV) {
-		print STDERR "E: The remove should have at least one arguments\n";
-		exit 10;
-	}
-
-	$| = 1;
-	print "Reading package lists... ";
-	get_available();
-	print "Done\n";
-	print "Building dependency tree\n";
-	build_tree();
-	print "Reading state information... ";
-	get_installed();
-	print "Done\n";
-
-	my $opt = { print => 0 };
-	exit 10
-		unless list_rdepends($opt, @ARGV);
-	my $u = $opt->{installed_level};
-	make_changes({
-		removes => [ sort { $u->{$b} <=> $u->{$a} } keys %$u ],
-	});
-} elsif ($cmd eq 'upgrade') {
-	logger("cygapt $cmd @ARGV");
-	$| = 1;
-	print "Reading package lists... ";
-	get_available();
-	print "Done\n";
-	print "Building dependency tree\n";
-	build_tree();
-	print "Reading state information... ";
-	get_installed();
-	print "Done\n";
-
-	my ($upgrades, $new_deps) = upgradable(@ARGV);
-	print "Calculating upgrade... Done\n";
-
-	make_changes({
-		upgrade_deps => $new_deps,
-		upgrades => $upgrades,
-	});
-} elsif ($cmd eq 'autoremove') {
-	logger("cygapt $cmd @ARGV");
-	if (@ARGV) {
-		print STDERR "E: The autoremove command takes no arguments\n";
-		exit 10;
-	}
-
-	$| = 1;
-	print "Reading package lists... ";
-	get_available();
-	print "Done\n";
-	print "Building dependency tree\n";
-	build_tree();
-	print "Reading state information... ";
-	get_installed();
-	print "Done\n";
-
-	my $rems = autoremove();
-	make_changes({ removes => $rems });
-} elsif ($cmd eq 'clean') {
-	logger("cygapt $cmd @ARGV");
-	if (@ARGV) {
-		print STDERR "E: The clean command takes no arguments\n";
-		exit 10;
-	}
-	clean();
-	exit 0;
-} elsif ($cmd eq 'depends') {
-	unless (@ARGV) {
-		print STDERR "E: No packages found\n";
-		exit 10;
-	}
-	$| = 1;
-	print "Reading package lists... ";
-	get_available();
-	print "Done\n";
-	print "Building dependency tree\n";
-	build_tree();
-	print "Reading state information... ";
-	get_installed();
-	print "Done\n";
-
-	list_depends({
-			recurse => $recurse ? ~0 : 1,
-			fullrecurse => $fullrecurse ? ~0 : 1,
-		},@ARGV);
-} elsif ($cmd eq 'rdepends') {
-	unless (@ARGV) {
-		print STDERR "E: No packages found\n";
-		exit 10;
-	}
-	$| = 1;
-	print "Reading package lists... ";
-	get_available();
-	print "Done\n";
-	print "Building dependency tree\n";
-	build_tree();
-	print "Reading state information... ";
-	get_installed();
-	print "Done\n";
-
-	list_rdepends(@ARGV);
-} elsif ($cmd eq 'search') {
-} elsif ($cmd eq 'find') {
-	unless (@ARGV) {
-		print STDERR "E: No files provided\n";
-		exit 10;
-	}
-
-	$| = 1;
-	print "Reading state information... ";
-	get_installed();
-	print "Done\n";
-
-	find(@ARGV);
-} elsif ($cmd eq 'files') {
-	unless (@ARGV) {
-		print STDERR "E: No packages provided\n";
-		exit 10;
-	}
-
-	$| = 1;
-	print "Reading state information... ";
-	get_installed();
-	print "Done\n";
-
-	files(@ARGV);
-} elsif ($cmd eq 'mark-manual') {
-	unless (@ARGV) {
-		print STDERR "E: No packages provided\n";
-		exit 10;
-	}
-
-	$| = 1;
-	print "Reading state information... ";
-	get_installed();
-	print "Done\n";
-
-	mark(1, @ARGV);
-} elsif ($cmd eq 'mark-automatic') {
-	unless (@ARGV) {
-		print STDERR "E: No packages provided\n";
-		exit 10;
-	}
-
-	$| = 1;
-	print "Reading state information... ";
-	get_installed();
-	print "Done\n";
-
-	mark(0, @ARGV);
-}
 exit 0;
+
+
 
 sub list {
 	my $opt = { };
@@ -1923,26 +2173,56 @@ sub logger {
 }
 
 sub usage {
-	print STDERR @_, "\n"
-		if @_;
-	print STDERR <<USAGE;
+	my $fh = @_ ? *STDERR : *STDOUT;
+
+	print $fh @_, "\n"
+		if @_ && $_[0];
+	print $fh <<USAGE;
 Usage: cygapt [options] command
 
 cygapt is a commandline package manager for Cygwin, that tries to provide
 a similar interface as APT on Debian.
 
 Commands:
-  list - list packages based on package names
-  install - install packages
-  remove - remove packages
-  update - update list of available packages
-  upgrade - upgrade the system by installing/upgrading packages
-
-Options:
-  -y, --yes
-  -v, --verbose
-  -h, --help
 USAGE
 
+	for my $cmd (@command) {
+		next
+			if ref $cmd || ! exists $command{$cmd}{help};
+		my $t = $command{$cmd}{help};
+		$t =~ s{Usage:[^\n]*\n\n}{}ms;
+		$t =~ s{\n.*$}{}ms;
+		print $fh "  $cmd",
+			length($cmd) >= 14 ? "\t"
+			: length($cmd) >= 6 ? "\t\t"
+			: "\t\t\t",
+			"$t\n";
+	}
+	print $fh "\n";
+	general_options($fh);
+
 	exit @_ ? 10 : 0;
+}
+
+sub usage_cmd {
+	my ($cmd) = shift @_;
+	my $fh = @_ ? *STDERR : *STDOUT;
+	print $fh @_, "\n"
+		if @_ && $_[0];
+
+	print $fh "$command{$cmd}{help}\n";
+	general_options($fh);
+
+	exit @_ ? 10 : 0;
+}
+
+sub general_options {
+	my ($fh) = @_;
+	print $fh <<OPTIONS;
+General options:
+  -s, -n, --dry-run	make no changes
+  -h, --help		this help, or help about a command
+  -root=ROOT		root directory of installation to act upon
+  -d, --debug
+OPTIONS
 }
