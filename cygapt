@@ -642,8 +642,8 @@ sub update {
 	http_done();
 
 	print "Reading state information... ";
-	get_installed();
-	get_available();
+	get_installed('quiet');
+	get_available('quiet');
 	my $u = list({ count_only => 1, upgradable => 1});
 	print "Done\n";
 	print "$u packages can be upgraded. ",
