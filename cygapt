@@ -12,6 +12,8 @@ use POSIX qw(uname);
 use Time::HiRes qw(time sleep);
 use Term::ReadKey;
 use HTTP::Date qw(time2str str2time);
+use Digest::SHA;
+use Digest::MD5;
 use Data::Dumper;
 
 use constant {
@@ -65,8 +67,8 @@ HELP
 		sub => sub {
 			$| = 1;
 			print "Listing... ";
-			get_available();
-			get_installed();
+			get_available('quiet');
+			get_installed('quiet');
 			print "Done\n";
 			list({ upgradable => $upgradable,
 				installed => $installed,
@@ -101,8 +103,8 @@ HELP
 				print STDERR "E: No packages found\n";
 				exit 10;
 			}
-			get_installed();
-			get_available();
+			get_installed('quiet');
+			get_available('quiet');
 			list({ show => 1, upgradable => $upgradable,
 				installed => $installed,
 				all => $allversions},
@@ -140,6 +142,10 @@ Usage: cygapt [options] upgrade {package{=version|/release}}...
 
 upgrade the system by installed/upgrading packages
 
+WARNING: upgrading certain library packages may result in cygapt aborting,
+or looping trying to clone. If this happens, break the running process, and
+try to restart.
+
 Options for upgrade:
   -t, --target=RELEASE	select version from this RELEASE
   --allow-downgrades	allow selecting versions before the installed version
@@ -147,18 +153,11 @@ Options for upgrade:
   -d, --download-only	only download packages, do not upgrade
 HELP
 		sub => sub {
-			$| = 1;
-			print "Reading package lists... ";
 			get_available();
-			print "Done\n";
-			print "Building dependency tree\n";
 			build_tree();
-			print "Reading state information... ";
 			get_installed();
-			print "Done\n";
 
 			my ($upgrades, $new_deps) = upgradable(@ARGV);
-			print "Calculating upgrade... Done\n";
 
 			make_changes({
 				upgrade_deps => $new_deps,
@@ -195,24 +194,20 @@ HELP
 				exit 10;
 			}
 
-			$| = 1;
-			print "Reading package lists... ";
 			get_available();
-			print "Done\n";
-			print "Building dependency tree\n";
 			build_tree();
-			print "Reading state information... ";
 			get_installed();
-			print "Done\n";
 
 			my $opt = { print => 0 };
 			exit 10
 				unless list_depends($opt, @ARGV);
 
+			my $i = $opt->{install};
 			my $uls = $opt->{uninstalled_level};
-			my @i = grep ! $uls->{$_}, keys %$uls;
+			my @i = sort { $uls->{$b} <=> $uls->{$a} }
+				keys %$i;
 			my @d = sort { $uls->{$b} <=> $uls->{$a} }
-				grep $uls->{$_}, keys %$uls;
+				grep ! exists $i->{$_}, keys %$uls;
 
 			make_changes({
 				installs => \@i,
@@ -241,15 +236,9 @@ HELP
 				exit 10;
 			}
 
-			$| = 1;
-			print "Reading package lists... ";
 			get_available();
-			print "Done\n";
-			print "Building dependency tree\n";
 			build_tree();
-			print "Reading state information... ";
 			get_installed();
-			print "Done\n";
 
 			my $opt = { print => 0 };
 			exit 10
@@ -276,16 +265,9 @@ HELP
 				exit 10;
 			}
 
-			$| = 1;
-			print "Reading package lists... ";
 			get_available();
-			print "Done\n";
-			print "Building dependency tree\n";
 			build_tree();
-			print "Reading state information... ";
 			get_installed();
-			print "Done\n";
-
 			my $rems = autoremove();
 			make_changes({ removes => $rems });
 		},
@@ -304,6 +286,7 @@ HELP
 					"takes no arguments\n";
 				exit 10;
 			}
+
 			clean();
 		},
 	},
@@ -313,34 +296,31 @@ HELP
 		opts => {
 			"r|recurse"	=> \$recurse,
 			"full-recurse"	=> \$fullrecurse,
+			"i|installed"	=> \$installed,
 		},
 		help => <<HELP,
 Usage: cygopt [options] depends package{=version|/release}...
 
-list dependencies of packages
+list dependencies of packages, defaults to dependencies for target version
 
 Options for depends:
   -r, --recurse		recurse into dependencies until an installed package
   --full-recurse	recurse through all dependencies
+  -i, --installed	show dependency of installed version
 HELP
 		sub => sub {
 			unless (@ARGV) {
 				print STDERR "E: No packages found\n";
 				exit 10;
 			}
-			$| = 1;
-			print "Reading package lists... ";
-			get_available();
-			print "Done\n";
-			print "Building dependency tree\n";
-			build_tree();
-			print "Reading state information... ";
-			get_installed();
-			print "Done\n";
 
+			get_available();
+			build_tree();
+			get_installed();
 			list_depends({
 					recurse => $recurse ? ~0 : 1,
 					fullrecurse => $fullrecurse ? ~0 : 1,
+					installed_version => $installed,
 				},@ARGV);
 		},
 	},
@@ -359,16 +339,10 @@ HELP
 				print STDERR "E: No packages found\n";
 				exit 10;
 			}
-			$| = 1;
-			print "Reading package lists... ";
-			get_available();
-			print "Done\n";
-			print "Building dependency tree\n";
-			build_tree();
-			print "Reading state information... ";
-			get_installed();
-			print "Done\n";
 
+			get_available();
+			build_tree();
+			get_installed();
 			list_rdepends(@ARGV);
 		},
 	},
@@ -381,6 +355,13 @@ Usage: cygapt [options] search words
 search package descriptions for the words
 HELP
 		sub => sub {
+			unless (@ARGV) {
+				print STDERR "E: No search words found\n";
+				exit 10;
+			}
+
+			get_available();
+			get_installed();
 		},
 	},
 
@@ -397,11 +378,7 @@ HELP
 				exit 10;
 			}
 
-			$| = 1;
-			print "Reading state information... ";
 			get_installed();
-			print "Done\n";
-
 			find(@ARGV);
 		},
 	},
@@ -419,11 +396,7 @@ HELP
 				exit 10;
 			}
 
-			$| = 1;
-			print "Reading state information... ";
 			get_installed();
-			print "Done\n";
-
 			files(@ARGV);
 		},
 	},
@@ -441,11 +414,7 @@ HELP
 				exit 10;
 			}
 
-			$| = 1;
-			print "Reading state information... ";
 			get_installed();
-			print "Done\n";
-
 			mark(1, @ARGV);
 		},
 	},
@@ -463,11 +432,7 @@ HELP
 				exit 10;
 			}
 
-			$| = 1;
-			print "Reading state information... ";
 			get_installed();
-			print "Done\n";
-
 			mark(0, @ARGV);
 		},
 	},
@@ -579,8 +544,10 @@ sub list {
 			if $debug > 1;
 
 		$count++;
-		next
-			if $opt->{count_only};
+		if ($opt->{count_only}) {
+			$opt->{upgrades}{$pack}++;
+			next;
+		}
 
 		my $u_t;
 		if ($opt->{show}) {
@@ -657,7 +624,7 @@ sub update {
 		"setup.ini");
 
 	my ($bz, $bzstat) = bzinflateInit;
-	my $res = http_get($url, $file, undef, sub {
+	my $res = http_get($url, $file, undef, undef, sub {
 		if (defined $_[0]) {
 			my ($data, $bzstat) = $bz->bzinflate($_[0]);
 			return $data;
@@ -699,10 +666,21 @@ sub make_changes {
 	my $uc = @{$changes->{upgrades}};
 	my $rc = @{$changes->{removes}}
 		+ @{$changes->{remove_rdeps}};
-# TODO: should also remove installs or upgrades from the upgrade
-	my $nuc = list({ count_only => 1, upgradable => 1}) - $uc;
-	my $ask;
 
+	my %upgrade = (count_only => 1, upgradable => 1);
+	list(\%upgrade);
+	my $us = $upgrade{upgrades};
+	for my $pack (@{$changes->{installs}},
+			@{$changes->{install_deps}},
+			@{$changes->{upgrades}},
+			@{$changes->{upgrade_deps}},
+			@{$changes->{removes}},
+			@{$changes->{remove_deps}}) {
+		delete $us->{$pack};
+	}
+	my $nuc = scalar keys %$us;
+
+	my $ask;
 	lock_installed();
 
 	# deps for install
@@ -787,8 +765,10 @@ sub make_changes {
 	if (@get) {
 		my $c;
 		for my $g (@get) {
+
 			$c++
-				if http_get($g->{url}, $g->{file}, $g->{size});
+				if http_get($g->{url}, $g->{file},
+					$g->{size}, $g->{hash});
 		}
 		if ($c == @get) {
 			http_done();
@@ -1097,6 +1077,11 @@ PACK:		for my $pack (keys %todo) {
 }
 
 sub build_tree {
+	my ($quiet) = @_;
+
+	print "Building dependency tree\n"
+		unless $quiet;
+
 	for my $p (values %package) {
 		_build_tree($p, 0);
 	}
@@ -1127,8 +1112,8 @@ sub _build_tree {
 	my $max_dep_depth = 0;
 	for my $v (values %{$p->{versions}}) {
 		my @dep;
-# TODO: figure out what the difference is between requires: and depends2:
 		if (exists $v->{tag_depends2}) {
+# TODO: should remove any version stuff, if that is ever used
 			@dep = split /,\s*/, $v->{tag_depends2};
 		} elsif (exists $p->{tag_requires}) {
 			@dep = split /\s+/, $p->{tag_requires};
@@ -1162,6 +1147,9 @@ sub _build_tree {
 }
 
 sub upgradable {
+	$| = 1;
+	print "Calculating upgrade... ";
+
 	my @arg_found;
 	my ($re, $t_rels, $t_vers) = argv2pack_re(@_);
 
@@ -1213,13 +1201,17 @@ sub upgradable {
 
 	my $up = $opt{upgradable_level};
 	my $un = $opt{uninstalled_level};
-	return (#[ sort { $package{$b}{dep_depth} <=> $package{$a}{dep_depth} }
+
+	my @res =
+		(#[ sort { $package{$b}{dep_depth} <=> $package{$a}{dep_depth} }
 		[ sort { $up->{$b} <=> $up->{$a} } keys %$up ],
 		[ sort { $un->{$b} <=> $un->{$a} } keys %$un ]);
+
+	print "Done\n";
+	return @res;
 }
 
 sub list_depends {
-# TODO: should depends list depends for installed or target version?
 	my $opt = { };
 	$opt = shift @_
 		if @_ && ref $_[0] eq 'HASH';
@@ -1232,7 +1224,6 @@ sub list_depends {
 	my ($re, $t_rels, $t_vers) = argv2pack_re(@_);
 
 	for my $pack (sort keys %package) {
-# TODO: if called for install command, should mark any named packages as picked, even if already installed
 		$a = undef;
 		next
 			if $re && $pack !~ $re;
@@ -1265,6 +1256,7 @@ print "Should mark $pack for upgrade!\n";
 		$opt->{depends} = { }
 			if $opt->{print};
 		depends($opt, $pack);
+		$opt->{install}{$pack} = 1;
 	}
 
 	my $rc = 1;
@@ -1311,6 +1303,9 @@ sub depends {
 		print '  ' x $opt->{level}, $pack,
 			@t ? " [".join(",", @t)."]" : "",
 			"\n"
+	} elsif ($p->{v_installed} && $p->{v_target}
+		&& $p->{v_target} ne $p->{v_installed}) {
+		$opt->{upgradable_level}{$pack} = 999 - $p->{dep_depth};
 	}
 
 	# recurse until we find an installed version
@@ -1327,7 +1322,9 @@ sub depends {
 		return 0;
 	}
 
-	my $v = $p->{versions}{$p->{v_target}};
+	my $vers = $opt->{installed_version} && $p->{v_installed}
+		? $p->{v_installed} : $p->{v_target};
+	my $v = $p->{versions}{$vers};
 	my %opt2 = (
 		%$opt,
 		level => $opt->{level}+1,
@@ -1344,7 +1341,6 @@ sub depends {
 }
 
 sub list_rdepends {
-# TODO: should rdepends list depends for installed or target version?
 	my $opt = { };
 	$opt = shift @_
 		if @_ && ref $_[0] eq 'HASH';
@@ -1589,6 +1585,11 @@ sub print_array {
 }
 
 sub get_installed {
+	my ($quiet) = @_;
+	unless ($quiet) {
+		$| = 1;
+		print "Reading state information... ";
+	}
 	my $fh;
 
 	unless (open $fh, '<', $root.INSTALLED) {
@@ -1644,6 +1645,9 @@ sub get_installed {
 	}
 
 	close($fh);
+
+	print "Done\n"
+		unless $quiet;
 }
 
 my $installed_fh;
@@ -1725,6 +1729,13 @@ sub unlock_installed {
 }
 
 sub get_available {
+	my ($quiet) = @_;
+
+	unless ($quiet) {
+		$| = 1;
+		print "Reading package lists... ";
+	}
+
 	my $fh;
 	my $setup_name = $root.join("/", $setup{cache_mirror},
 		$setup{arch}, "setup.ini");
@@ -1750,7 +1761,7 @@ sub get_available {
 
 		if (/^\@\s+(\S+)/) {
 			$pack = $1;
-			$rel = 'current';
+			$rel = 'curr';
 			#print "package $pack\n";
 			$vals->{base} = $setup{last_mirror}[0];
 			next;
@@ -1787,6 +1798,9 @@ sub get_available {
 	}
 
 	close($fh);
+
+	print "Done\n"
+		unless $quiet;
 }
 
 sub _available_store {
@@ -1888,11 +1902,23 @@ sub select_package_versions {
 
 my ($http_total_size, $http_start, $http_end);
 sub http_get {
-	my ($url, $file, $total_size, $sub) = @_;
+	my ($url, $file, $total_size, $hash, $sub) = @_;
 	$url =~ s{(?<=[^:])//+}{/}g;
 	print "get $url\n"
 		if $debug;
 	(my $name = $url) =~ s{^.*/}{};
+
+	my ($hmac, $match);
+	if (! $hash) {
+	} elsif (length($hash) == 128) {
+		$hmac = Digest::SHA->new(512);
+		$match = sub { $hmac->hexdigest eq $hash };
+	} elsif (length($hash) == 86) {
+		$hmac = Digest::md5->new();
+		$match = sub { $hmac->b64digest eq $hash };
+	} else {
+		print STDERR "W: $name has unknown hash format $hash\n";
+	}
 
 	state $ua = get_user_agent();
 	state $idx = 0;
@@ -1922,6 +1948,8 @@ sub http_get {
 		my ($data) = @_;
 		$data = $sub->($data)
 			if $sub;
+		$hmac->add($data)
+			if $hmac;
 		print $fh $data;
 
 		state $last = 0;
@@ -1959,8 +1987,13 @@ sub http_get {
 	$http_end = $end
 		unless $http_end && $http_end > $end;
 
-# TODO: should check hash of downloaded file vs. setup.ini
 	if ($res->is_success) {
+		if ($match && ! $match->()) {
+			print "Err:$idx $url\n does not verify\n";
+			unlink("$file.new");
+			print STDERR "W: Failed to match hash $url\n";
+			return 0;
+		}
 		if (my $t = $res->header('Last-Modified')) {
 				$t = str2time($t);
 				utime $t, $t, "$file.new";
@@ -1977,7 +2010,7 @@ sub http_get {
 		$size = -s $file;
 		return $size;
 	} else {
-		print "Err:1 $url\n ", $res->message, "\n";
+		print "Err:$idx $url\n ", $res->message, "\n";
 		unlink("$file.new");
 		print STDERR "W: Failed to fetch $url ", $res->message, "\n";
 		return 0;
