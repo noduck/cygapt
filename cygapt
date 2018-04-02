@@ -41,7 +41,7 @@ my %common_opt = (
 );
 
 my ($installed, $upgradable, $allversions, $target_release, $downgrades, $yes,
-	$downloadonly, $reinstall, $purge, $recurse, $fullrecurse);
+	$downloadonly, $reinstall, $combine_or, $recurse, $fullrecurse);
 
 my @command = (
 	list => {
@@ -349,6 +349,9 @@ HELP
 
 
 	search => {
+		opts => {
+			"or"		=> \$combine_or,
+		},
 		help => <<HELP,
 Usage: cygapt [options] search words
 
@@ -362,6 +365,8 @@ HELP
 
 			get_available();
 			get_installed();
+			search({ combine => $combine_or ? "||" : "&&" },
+				@ARGV);
 		},
 	},
 
@@ -456,6 +461,13 @@ for my $c (values %command) {
 	while (my ($k, $v) = each %{$c->{opts}}) {
 		$all_opts{$k} = $v;
 	}
+}
+
+my $color;
+if (-t STDOUT) {
+	eval "use Term::ANSIColor";
+	$color = 1
+		unless $@;
 }
 
 # ignore all opts and find command
@@ -1402,6 +1414,41 @@ sub rdepends {
 }
 
 sub search {
+	my $opt = shift @_;
+
+	my @re = map glob2re($_), @_;
+	my $re;
+	if ($opt->{combine} eq '||') {
+		$re = join("|", map "(?:$_)", @re);
+		$re = qr{$re}ims;
+	} else {
+		$re = join("", map "(?=.*$_)", @re);
+		$re = qr{^$re}ims;
+	}
+	print "Match: $re\n"
+		if $debug;
+
+	for my $pack (sort keys %package) {
+		my $p = $package{$pack};
+
+		my $info = ($p->{tag_ldesc} ? "\n$p->{tag_ldesc}" : "");
+		# indent ldesc
+		$info =~ s{\n}{\n  }gms;
+		$info = ($p->{tag_sdesc} ? "$p->{tag_sdesc}" : "").$info;
+
+		next
+			unless $info =~ $re;
+
+		if ($color) {
+			# colorize matches
+			for my $w (@re) {
+				$info =~ s{($w)}
+					{color('green').$1.color('reset')}geims;
+			}
+		}
+
+		print "\n$pack: $info\n";
+	}
 }
 
 sub find {
@@ -1973,7 +2020,12 @@ sub http_get {
 		} else {
 			$s = size2t($size);
 		}
-		print "[$idx $name $s]\e[K\r";
+		if ($color) {
+			print color('yellow'), "[$idx $name $s]",
+				color('reset'), "\e[K\r";
+		} else {
+			print "[$idx $name $s]\e[K\r";
+		}
 # TODO: overall progress??
 # 38% [29 package 1024 kB/49.9 MB 0%]                104 MB/s 14s
 	});
