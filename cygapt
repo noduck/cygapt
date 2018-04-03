@@ -67,8 +67,8 @@ HELP
 		sub => sub {
 			$| = 1;
 			print "Listing... ";
-			get_available('quiet');
-			get_installed('quiet');
+			get_available(\'quiet');
+			get_installed(\'quiet');
 			print "Done\n";
 			list({ upgradable => $upgradable,
 				installed => $installed,
@@ -103,8 +103,8 @@ HELP
 				print STDERR "E: No packages found\n";
 				exit 10;
 			}
-			get_installed('quiet');
-			get_available('quiet');
+			get_installed(\'quiet');
+			get_available(\'quiet');
 			list({ show => 1, upgradable => $upgradable,
 				installed => $installed,
 				all => $allversions},
@@ -157,12 +157,8 @@ HELP
 			build_tree();
 			get_installed();
 
-			my ($upgrades, $new_deps) = upgradable(@ARGV);
-
-			make_changes({
-				upgrade_deps => $new_deps,
-				upgrades => $upgrades,
-			});
+			my $changes = upgradable(@ARGV);
+			make_changes($changes);
 		},
 	},
 
@@ -198,21 +194,8 @@ HELP
 			build_tree();
 			get_installed();
 
-			my $opt = { print => 0 };
-			exit 10
-				unless list_depends($opt, @ARGV);
-
-			my $i = $opt->{install};
-			my $uls = $opt->{uninstalled_level};
-			my @i = sort { $uls->{$b} <=> $uls->{$a} }
-				keys %$i;
-			my @d = sort { $uls->{$b} <=> $uls->{$a} }
-				grep ! exists $i->{$_}, keys %$uls;
-
-			make_changes({
-				installs => \@i,
-				install_deps => \@d,
-			});
+			my $changes = upgradable(@ARGV);
+			make_changes($changes);
 		},
 	},
 
@@ -654,8 +637,8 @@ sub update {
 	http_done();
 
 	print "Reading state information... ";
-	get_installed('quiet');
-	get_available('quiet');
+	get_installed(\'quiet');
+	get_available(\'quiet');
 	my $u = list({ count_only => 1, upgradable => 1});
 	print "Done\n";
 	print "$u packages can be upgraded. ",
@@ -707,6 +690,8 @@ sub make_changes {
 		print_array(sort(@{$changes->{installs}},
 			@{$changes->{install_deps}},
 			@{$changes->{upgrade_deps}}));
+		$ask = 1
+			if @{$changes->{upgrade_deps}};
 	}
 	# upgrades
 	if ($uc) {
@@ -821,19 +806,21 @@ sub do_install {
 	logger("unpack $pack $vers");
 	print "Preparing to unpack .../$fname ...\n";
 
+	my $lst_fh;
+	my $lst_name = "$root/etc/setup/$pack.lst.gz";
+	unless ($dryrun) {
+		unless ($lst_fh = gzopen($lst_name, 'wb')) {
+			print STDERR "E: Cannot write $lst_name: $!\n";
+			exit 10;
+		}
+	}
+
+	print "Unpacking $pack ($vers) ...\n";
 	if ($dryrun) {
 		print "\tdryrun\n";
 		return;
 	}
 
-	my $lst_fh;
-	my $lst_name = "$root/etc/setup/$pack.lst.gz";
-	unless ($lst_fh = gzopen($lst_name, 'wb')) {
-		print STDERR "E: Cannot write $lst_name: $!\n";
-		exit 10;
-	}
-
-	print "Unpacking $pack ($vers) ...\n";
 	my $tar_fh;
 	unless (open $tar_fh, '-|',
 		'tar', '-C', "$root/",
@@ -880,11 +867,6 @@ sub do_upgrade {
 	logger("unpack $pack $new_vers over $old_vers");
 	print "Preparing to unpack .../$fname ...\n";
 
-	if ($dryrun) {
-		print "\tdryrun\n";
-		return;
-	}
-
 	my %old_file;
 	my $lst_fh;
 	my $lst_name = "$root/etc/setup/$pack.lst.gz";
@@ -897,12 +879,19 @@ sub do_upgrade {
 		$lst_fh->gzclose;
 	}
 
-	unless ($lst_fh = gzopen($lst_name, 'wb')) {
-		print STDERR "E: Cannot write $lst_name: $!\n";
-		exit 10;
+	unless ($dryrun) {
+		unless ($lst_fh = gzopen($lst_name, 'wb')) {
+			print STDERR "E: Cannot write $lst_name: $!\n";
+			exit 10;
+		}
 	}
 
 	print "Unpacking $pack ($new_vers) over ($old_vers) ...\n";
+	if ($dryrun) {
+		print "\tdryrun\n";
+		return;
+	}
+
 	my $tar_fh;
 # TODO: error here; upgrade replace a Perl dll, and then child loads newer...
 #
@@ -1159,23 +1148,35 @@ sub _build_tree {
 }
 
 sub upgradable {
+	my $quiet;
+	$quiet = ${shift @_}
+		if @_ && ref $_[0] eq 'SCALAR';
 	$| = 1;
-	print "Calculating upgrade... ";
+	print "Calculating upgrade... "
+		unless $quiet;
 
 	my @arg_found;
 	my ($re, $t_rels, $t_vers) = argv2pack_re(@_);
 
-	my @upgrade;
+	my (%install, @upgrade);
 	for my $pack (keys %package) {
 		my $p = $package{$pack};
-		next
-			unless $p->{v_installed};
 
 		$a = undef;
 		if ($re) {
 			next
 				if $pack !~ $re;
 			$arg_found[$a]++;
+			if ($pack ne $_[$a]) {
+				unless ($quiet) {
+					print "Done\n";
+					$quiet = 1;
+				}
+				print "Note, selecting '$pack' for ",
+					"glob '$_[$a]'\n";
+			}
+		} elsif (! $p->{v_installed}) {
+			next;
 		}
 
 		select_package_versions($p,
@@ -1186,41 +1187,73 @@ sub upgradable {
 			print STDERR "W: no installable version for $pack\n"
 				if $re;
 			next;
+		} elsif (! $p->{v_installed}) {
+			$install{$pack}++;
+			next;
 		} elsif ($p->{v_target} eq $p->{v_installed}) {
-			if ($re) {
+			if ($reinstall) {
+# reinstall should also reinstall package, not its depends (unless upgrades)
+				$install{$pack}++;
+			} elsif ($re) {
+				unless ($quiet) {
+					print "Done\n";
+					$quiet = 1;
+				}
+				if (! $p->{picked}) {
+					$p->{picked} = 1;
+					print "$pack set to manually ",
+						"installed.\n";
+					lock_installed();
+					write_installed();
+				}
 				print "$pack is already the newest ",
 					"version ($p->{v_installed})\n";
 			}
 			next;
 		}
-
 		push @upgrade, $pack;
+		
 	}
 
 	my $rc = 1;
 	for my $i (0..$#_) {
 		next
 			if $arg_found[$i];
+		unless ($quiet) {
+			print "Done\n";
+			$quiet = 1;
+		}
 		print STDERR "E: Unable to locate package $_[$i]\n";
 		$rc = 0;
 	}
 	return ([], [])
 		unless $rc;
 
-	my %opt = ( fullrecurse => ~0, print => 0 );
-	map(depends(\%opt, $_), @upgrade)
-		if @upgrade;
 
-	my $up = $opt{upgradable_level};
-	my $un = $opt{uninstalled_level};
+	my $changes;
+	my %opt_i = ( fullrecurse => ~0, print => 0 );
+	map(depends(\%opt_i, $_), keys %install);
+	my %opt_u = ( %opt_i );
+	map(depends(\%opt_u, $_), @upgrade);
 
-	my @res =
-		(#[ sort { $package{$b}{dep_depth} <=> $package{$a}{dep_depth} }
-		[ sort { $up->{$b} <=> $up->{$a} } keys %$up ],
-		[ sort { $un->{$b} <=> $un->{$a} } keys %$un ]);
+	my $in = $opt_i{uninstalled_level};
+	$changes->{installs} = [ sort { $in->{$b} <=> $in->{$a} }
+		grep exists $in->{$_}, keys %install ];
+	$changes->{install_deps} = [ sort { $in->{$b} <=> $in->{$a} }
+		grep ! exists $install{$_}, keys %$in ];
 
-	print "Done\n";
-	return @res;
+	my $up = $opt_u{upgradable_level};
+	$changes->{upgrades} = [ sort { $up->{$b} <=> $up->{$a} }
+		grep ! exists $install{$_}, keys %$up ];
+
+	my $un = $opt_i{uninstalled_level};
+	$changes->{upgrade_deps} = [ sort { $un->{$b} <=> $un->{$a} }
+		grep ! exists $in->{$_}, keys %$un ];
+
+	print "Done\n"
+		unless $quiet;
+
+	return $changes;
 }
 
 sub list_depends {
@@ -1240,6 +1273,8 @@ sub list_depends {
 		next
 			if $re && $pack !~ $re;
 		$arg_found[$a]++;
+		print "Note, selecting '$pack' for glob '$_[$a]'\n"
+			if $pack ne $_[$a];
 		my $p = $package{$pack};
 
 		$opt->{t_rel} = $t_rels->[$a];
@@ -1249,8 +1284,6 @@ sub list_depends {
 		if ($opt->{print} || ! $p->{v_installed} || ! $p->{v_target}) {
 		} else {
 			if ($p->{v_installed} ne $p->{v_target}) {
-# TODO: mark $pack for upgrade
-print "Should mark $pack for upgrade!\n";
 			} else {
 				print "$pack is already the newest version ",
 					"($p->{v_installed})\n";
@@ -1360,15 +1393,20 @@ sub list_rdepends {
 	$opt->{level} //= 0;
 	$opt->{installed_level} //= { };
 
-	my @arg_found;
+	my (@arg_found, @not_removed);
 	my ($re) = argv2pack_re(@_);
 	for my $pack (sort keys %package) {
 		next
 			unless $pack =~ m{$re};
 		$arg_found[$a]++;
+		print "Note, selecting '$pack' for glob '$_[$a]'\n"
+			if $pack ne $_[$a];
 		next
 			unless ! exists $opt->{rdepends}{$pack};
 			#&& $package{$pack}{v_installed};
+
+		push @not_removed, $pack
+			unless $package{$pack}{v_installed};
 
 		$opt->{installed_level}{$pack} = $opt->{level}
 			if $package{$pack}{v_installed};
@@ -1377,9 +1415,14 @@ sub list_rdepends {
 
 	my $rc = 1;
 	for my $i (0..$#_) {
-		next
-			if $arg_found[$i];
-		print STDERR "E: Unable to locate installed package $_[$i]\n";
+		if (! $arg_found[$i]) {
+			$rc = 0;
+			print STDERR "E: Unable to locate package $_[$i]\n";
+		}
+	}
+	for my $pack (@not_removed) {
+		print STDERR "Package '$pack' is not intalled, ",
+			"so not removed\n";
 		$rc = 0;
 	}
 	return $rc;
