@@ -158,7 +158,8 @@ HELP
 			get_installed();
 
 			my $changes = upgradable(@ARGV);
-			make_changes($changes);
+			make_changes($changes)
+				if $changes;
 		},
 	},
 
@@ -195,7 +196,8 @@ HELP
 			get_installed();
 
 			my $changes = upgradable(@ARGV);
-			make_changes($changes);
+			make_changes($changes)
+				if $changes;
 		},
 	},
 
@@ -618,6 +620,7 @@ sub update {
 	my $file = $root.join("/", $setup{cache_mirror}, $setup{arch},
 		"setup.ini");
 
+	http_start(undef, 1);
 	my ($bz, $bzstat) = bzinflateInit;
 	my $res = http_get($url, $file, undef, undef, sub {
 		if (defined $_[0]) {
@@ -759,9 +762,15 @@ sub make_changes {
 			unless $_ =~ /^\s*(?:y.*)?\s*$/;
 	}
 
+	http_start($total_size, scalar @get);
 	if (@get) {
-		my $c;
+		my $c = 0;
 		for my $g (@get) {
+			if ($dryrun) {
+				$c++;
+				print "Get $g->{file}\n";
+				next;
+			}
 
 			$c++
 				if http_get($g->{url}, $g->{file},
@@ -1158,7 +1167,7 @@ sub upgradable {
 	my @arg_found;
 	my ($re, $t_rels, $t_vers) = argv2pack_re(@_);
 
-	my (%install, @upgrade);
+	my (%install, @reinstall, @upgrade);
 	for my $pack (keys %package) {
 		my $p = $package{$pack};
 
@@ -1192,8 +1201,7 @@ sub upgradable {
 			next;
 		} elsif ($p->{v_target} eq $p->{v_installed}) {
 			if ($reinstall) {
-# reinstall should also reinstall package, not its depends (unless upgrades)
-				$install{$pack}++;
+				push @reinstall, $pack;
 			} elsif ($re) {
 				unless ($quiet) {
 					print "Done\n";
@@ -1211,8 +1219,8 @@ sub upgradable {
 			}
 			next;
 		}
+
 		push @upgrade, $pack;
-		
 	}
 
 	my $rc = 1;
@@ -1226,18 +1234,21 @@ sub upgradable {
 		print STDERR "E: Unable to locate package $_[$i]\n";
 		$rc = 0;
 	}
-	return ([], [])
+	return (undef)
 		unless $rc;
 
 
 	my $changes;
 	my %opt_i = ( fullrecurse => ~0, print => 0 );
+
+	# should only search for depends of newly installed, not reinstall
 	map(depends(\%opt_i, $_), keys %install);
 	my %opt_u = ( %opt_i );
-	map(depends(\%opt_u, $_), @upgrade);
+	# but upgrades for reinstall depends are included
+	map(depends(\%opt_u, $_), @upgrade, @reinstall);
 
 	my $in = $opt_i{uninstalled_level};
-	$changes->{installs} = [ sort { $in->{$b} <=> $in->{$a} }
+	$changes->{installs} = [ @reinstall, sort { $in->{$b} <=> $in->{$a} }
 		grep exists $in->{$_}, keys %install ];
 	$changes->{install_deps} = [ sort { $in->{$b} <=> $in->{$a} }
 		grep ! exists $install{$_}, keys %$in ];
@@ -1656,14 +1667,14 @@ sub get_setup {
 	($setup{arch} = (uname)[4]) =~ s/^i6/x/;
 }
 
+my $term_width;
 sub print_array {
-	my ($width) = GetTerminalSize();
-	$width--;
+	$term_width //= (GetTerminalSize())[0];
 
 	print " ";
 	my $w = 1;
 	for my $a (@_) {
-		if ($w + length($a) >= $width) {
+		if ($w + length($a) > $term_width-3) {
 			print "\n  $a";
 			$w = 2 + length($a);
 		} else {
@@ -1990,7 +2001,13 @@ sub select_package_versions {
 				$p->{versions}{$p->{v_target}}{version_idx});
 }
 
-my ($http_total_size, $http_start, $http_end);
+my ($http_total_size, $http_total_count, $http_size, $http_start, $http_end,
+	$http_speed);
+
+sub http_start {
+	($http_total_size, $http_total_count) = @_;
+}
+
 sub http_get {
 	my ($url, $file, $total_size, $hash, $sub) = @_;
 	$url =~ s{(?<=[^:])//+}{/}g;
@@ -2032,6 +2049,7 @@ sub http_get {
 	my $data;
 	my $size = 0;
 	my $start = time;
+	$http_size //= 0;
 	$http_start = $start
 		unless $http_start && $http_start < $start;
 	my $res = $ua->request($req, sub {
@@ -2044,15 +2062,19 @@ sub http_get {
 
 		state $last = 0;
 		my $res = $_[1];
-		$total_size = $res->header('Content-Length') // -1
-			unless defined $total_size;
+		unless (defined $total_size) {
+			$total_size = $res->header('Content-Length') // -1;
+			$http_total_size = $total_size
+				if $total_size > 0;
+		}
 		$size += length($_[0]);
 
 		my $now = time;
 		return
-			unless $now - $last > 0.1;
+			unless $now - $last > 0.2;
 		$last = $now;
 
+		# progress
 		my $s;
 		unless ($size || $total_size) {
 			$s = 'Waiting for headers';
@@ -2063,14 +2085,56 @@ sub http_get {
 		} else {
 			$s = size2t($size);
 		}
+		my $pro = "[$idx $name $s]";
+
+		# overall progress
+		if ($http_total_size) {
+			my $s = $http_size + $size;
+			$pro = sprintf("%d%% ", $s / $http_total_size * 100)
+				.$pro
+				if $http_total_count > 1;
+
+			my $speed = $s / ($now - $http_start);
+			# smooth out calculated download speed
+			$http_speed = $http_speed
+				? $speed * 0.01 + $http_speed * 0.99
+				: $speed;
+
+			if ($now - $http_start > 5) {
+				my $todo = ($http_total_size - $s)
+					/ $http_speed;
+
+				# overall progress
+				use integer;
+				my $pro2 = $todo > 60*60
+					? sprintf("%dh %02dm %02ds",
+						$todo / 60 / 60,
+						($todo / 60) % 60, $todo % 60)
+					: $todo > 60
+					? sprintf("%dm %02ds",
+						$todo / 60, $todo % 60)
+					: sprintf("%ds", $todo);
+				$pro2 = size2t($http_speed)."/s $pro2";
+
+				if ($term_width) {
+					my $len = length($pro) + length($pro2);
+					# right align it, if there is space
+					$pro .= (' 'x($term_width - $len))
+						.$pro2
+						if $term_width > $len;
+				} else {
+					$pro .= ' '.$pro2;
+				}
+			}
+		}
+		
+
 		if ($color) {
-			print color('yellow'), "[$idx $name $s]",
+			print color('yellow'), $pro,
 				color('reset'), "\e[K\r";
 		} else {
-			print "[$idx $name $s]\e[K\r";
+			print "$pro\e[K\r";
 		}
-# TODO: overall progress??
-# 38% [29 package 1024 kB/49.9 MB 0%]                104 MB/s 14s
 	});
 
 	# flush
@@ -2095,8 +2159,7 @@ sub http_get {
 		}
 		rename("$file.new", $file);
 		print "Get:$idx $url\n";
-		$http_total_size //= 0;
-		$http_total_size += $total_size // $size;
+		$http_size += $total_size // $size;
 		return $total_size // $size;
 	} elsif ($res->code == 304) {
 		# not modified
@@ -2114,10 +2177,10 @@ sub http_get {
 
 sub http_done {
 	return
-		unless $http_total_size;
+		unless $http_size;
 	printf "Fetched %s in %ds (%s/s)\n",
-		size2t($http_total_size), $http_end - $http_start,
-		size2t($http_total_size / ($http_end - $http_start));
+		size2t($http_size), $http_end - $http_start,
+		size2t($http_size / ($http_end - $http_start));
 }
 
 sub get_user_agent {
