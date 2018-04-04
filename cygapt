@@ -628,14 +628,31 @@ sub list {
 }
 
 sub update {
+	http_start(undef, scalar @{$setup{last_mirror}});
+	for my $mirror (@{$setup{last_mirror}}) {
+		update_mirror($mirror);
+	}
+
+	http_done();
+
+	print "Reading state information... ";
+	get_installed(\'quiet');
+	get_available(\'quiet');
+	my $u = list({ count_only => 1, upgradable => 1});
+	print "Done\n";
+	print "$u packages can be upgraded. ",
+		"Run 'cygapt list --upgradable' to see them.\n"
+		if $u;
+}
+
+sub update_mirror {
+	my ($mirror) = @_;
 	local $| = 1;
 
-	my $url = $setup{last_mirror}[0].'/'.$setup{arch}.'/setup.bz2';
+	my $url = $mirror.'/'.$setup{arch}.'/setup.bz2';
+	my $file = $root.join("/", CACHE, uri_escape($mirror),
+		$setup{arch}, "setup.ini");
 
-	my $file = $root.join("/", $setup{cache_mirror}, $setup{arch},
-		"setup.ini");
-
-	http_start(undef, 1);
 	my ($bz, $bzstat) = bzinflateInit;
 	my $res = http_get($url, $file, undef, undef, sub {
 		if (defined $_[0]) {
@@ -652,16 +669,6 @@ sub update {
 	unless ($res) {
 		exit 10;
 	}
-	http_done();
-
-	print "Reading state information... ";
-	get_installed(\'quiet');
-	get_available(\'quiet');
-	my $u = list({ count_only => 1, upgradable => 1});
-	print "Done\n";
-	print "$u packages can be upgraded. ",
-		"Run 'cygapt list --upgradable' to see them.\n"
-		if $u;
 }
 
 sub make_changes {
@@ -748,7 +755,8 @@ sub make_changes {
 
 		my $v = $p->{versions}{$p->{v_target}};
 		my @install = split /\s+/, $v->{tag_install};
-		my $file = $root.join("/", $setup{cache_mirror}, $install[0]);
+		my $file = $root.join("/", CACHE, uri_escape($v->{base}),
+			$install[0]);
 		$file{$pack} = $file;
 		$total_size += $install[1];
 		next
@@ -1040,7 +1048,7 @@ sub do_remove {
 
 sub clean {
 	system('find', $root.CACHE,
-		qw(-mindepth 4 -maxdepth 4 -exec rm -r {} ;));
+		qw(-follow -maxdepth 3 -name release -type d -exec rm -r {} ;));
 }
 
 sub autoremove {
@@ -1680,7 +1688,6 @@ sub get_setup {
 		exit 10;
 	}
 
-	$setup{cache_mirror} = CACHE."/".uri_escape($setup{last_mirror}[0]);
 	($setup{arch} = (uname)[4]) =~ s/^i6/x/;
 }
 
@@ -1859,7 +1866,8 @@ sub get_available {
 	}
 
 	my $fh;
-	my $setup_name = $root.join("/", $setup{cache_mirror},
+	my $setup_name = $root.join("/", 
+		CACHE, uri_escape($setup{last_mirror}[0]),
 		$setup{arch}, "setup.ini");
 
 	unless (open $fh, '<', $setup_name) {
@@ -2031,7 +2039,13 @@ sub http_get {
 	$url =~ s{(?<=[^:])//+}{/}g;
 	print "get $url\n"
 		if $debug;
-	(my $name = $url) =~ s{^.*/}{};
+	my $name = $url;
+	if ($url =~ /setup.bz2$/) {
+		$name =~ s{^[htpsf]+:?/+}{};
+		$name =~ s{/.*}{};
+	} else {
+		$name =~ s{^.*/}{};
+	}
 
 	my ($hmac, $match);
 	if (! $hash) {
@@ -2045,6 +2059,7 @@ sub http_get {
 		print STDERR "W: $name has unknown hash format $hash\n";
 	}
 
+	state $forecast;
 	state $ua = get_user_agent();
 	state $idx = 0;
 	$idx++;
@@ -2083,8 +2098,20 @@ sub http_get {
 		my $res = $_[1];
 		unless (defined $total_size) {
 			$total_size = $res->header('Content-Length') // -1;
-			$http_total_size = $total_size
-				if $total_size > 0;
+
+			if ($total_size <= 0) {
+			} elsif (! $http_total_size) {
+				# guess all are the same size
+				$http_total_size = $total_size
+					* $http_total_count;
+				$forecast = 1;
+			} elsif ($forecast && $idx == $http_total_count) {
+				$http_total_size =
+					$http_total_size
+					* ($http_total_count-1)
+					/ $http_total_count
+					+ $total_size;
+			}
 		}
 		$size += length($_[0]);
 
@@ -2156,6 +2183,8 @@ sub http_get {
 		}
 	});
 
+	# clear progress
+	print "\e[K\r";
 	# flush
 	$sub->(undef)
 		if $sub;
