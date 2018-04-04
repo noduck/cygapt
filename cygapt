@@ -183,6 +183,10 @@ Options for install:
   -y, --yes		assume yes answer
   -d, --download-only	only download packages, do not install
   --reinstall		reinstall package, even if already installed
+
+WARNING: be careful installing older versions (--allow-downgrades), as
+Cygwin dependencies are not versioned. Packages depending on the downgraded
+package may not get downgraded leading to broken system.
 HELP
 		sub => sub {
 			unless (@ARGV) {
@@ -282,6 +286,8 @@ HELP
 			"r|recurse"	=> \$recurse,
 			"full-recurse"	=> \$fullrecurse,
 			"i|installed"	=> \$installed,
+			"t|target=s"	=> \$target_release,
+			"downgrades|allow-downgrades" => \$downgrades,
 		},
 		help => <<HELP,
 Usage: cygopt [options] depends package{=version|/release}...
@@ -292,6 +298,8 @@ Options for depends:
   -r, --recurse		recurse into dependencies until an installed package
   --full-recurse	recurse through all dependencies
   -i, --installed	show dependency of installed version
+  -t, --target=RELEASE	select version from this RELEASE
+  --allow-downgrades	allow selecting versions before the installed version
 HELP
 		sub => sub {
 			unless (@ARGV) {
@@ -440,6 +448,8 @@ HELP
 	},
 );
 my %command = @command;
+$command{dist_upgrade} = $command{upgrade};
+$command{auto_remove} = $command{autoremove};
 
 my %all_opts = %common_opt;
 for my $c (values %command) {
@@ -513,6 +523,8 @@ sub list {
 	$opt = shift @_
 		if @_ && ref $_[0] eq 'HASH';
 
+	# do not need to be strict on list/show with preventing downgrades
+	$downgrades = 1;
 	my ($re, $t_rels, $t_vers) = argv2pack_re(@_);
 
 	my $count = 0;
@@ -666,6 +678,8 @@ sub make_changes {
 		+ @{$changes->{remove_rdeps}};
 
 	my %upgrade = (count_only => 1, upgradable => 1);
+	# upgradables should be without target release
+	$target_release = undef;
 	list(\%upgrade);
 	my $us = $upgrade{upgrades};
 	for my $pack (@{$changes->{installs}},
@@ -920,7 +934,6 @@ sub do_upgrade {
 #    295 [main] perl 7552 child_info_fork::abort: C:\Cygwin\lib\perl5\vendor_perl\5.26\x86_64-cygwin-threads\auto\Compress\Bzip2\Bzip2.dll: Loaded to different address: parent(0x3EC3D0000) != child(0x55A250000)
 #Can't fork, trying again in 5 seconds at ./cygapt line 585, <$installed_fh> line 16.
 #
-# TODO: warning about restarting openssh service if needed...
 
 	unless (open $tar_fh, '-|',
 		'tar', '-C', "$root/",
@@ -1123,7 +1136,8 @@ sub _build_tree {
 	for my $v (values %{$p->{versions}}) {
 		my @dep;
 		if (exists $v->{tag_depends2}) {
-# TODO: should remove any version stuff, if that is ever used
+			# ignore versioned depends
+ 			(my $dep = $v->{tag_depends2}) =~ s/\s*\([^)]+\)//g;
 			@dep = split /,\s*/, $v->{tag_depends2};
 		} elsif (exists $p->{tag_requires}) {
 			@dep = split /\s+/, $p->{tag_requires};
@@ -1867,14 +1881,13 @@ sub get_available {
 		if (/^\@\s+(\S+)/) {
 			$pack = $1;
 			$rel = 'curr';
-			#print "package $pack\n";
 			$vals->{base} = $setup{last_mirror}[0];
 			next;
 		} elsif (/^\[(\S+)\]/) {
 			# store
 			_available_store($pack, $rel, $vals);
 			$rel = $1;
-			$vals = undef;
+			$vals = { base => $setup{last_mirror}[0] };
 			next;
 		} elsif ($key && defined $val) {
 			$val .= "\n$_";
@@ -1958,10 +1971,7 @@ sub select_package_versions {
 	my ($p, $t_rel, $t_ver) = @_;
 
 	return
-		if exists $p->{t_rel} && $p->{t_rel} eq ($t_rel // '')
-		&& exists $p->{t_ver} && $p->{t_ver} eq ($t_ver // '');
-	$p->{t_rel} = $t_rel // '';
-	$p->{t_ver} = $t_ver // '';
+		if exists $p->{v_target};
 
 	print "find $p->{name} for rel ", $t_rel // '<u>', 
 		" ver ", $t_ver // '<u>', "\n"
@@ -1996,6 +2006,7 @@ sub select_package_versions {
 				grep $_ =~ m{$t_rel}, @{$_->{releases}}
 			} @v)[0];
 	}
+
 	# only pick new target if it is newer, or we can downgrade (or no
 	# prior target)
 	$p->{v_target} = $target
