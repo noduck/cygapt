@@ -1667,14 +1667,18 @@ sub get_setup {
 	($setup{arch} = (uname)[4]) =~ s/^i6/x/;
 }
 
-my $term_width;
+sub term_width {
+	state $term_width //= (GetTerminalSize())[0];
+	return $term_width;
+}
+
 sub print_array {
-	$term_width //= (GetTerminalSize())[0];
+	my $width = term_width();
 
 	print " ";
 	my $w = 1;
 	for my $a (@_) {
-		if ($w + length($a) > $term_width-3) {
+		if ($w + length($a) > $width-3) {
 			print "\n  $a";
 			$w = 2 + length($a);
 		} else {
@@ -2048,6 +2052,7 @@ sub http_get {
 
 	my $data;
 	my $size = 0;
+	my $width = term_width();
 	my $start = time;
 	$http_size //= 0;
 	$http_start = $start
@@ -2116,12 +2121,12 @@ sub http_get {
 					: sprintf("%ds", $todo);
 				$pro2 = size2t($http_speed)."/s $pro2";
 
-				if ($term_width) {
+				if ($width) {
 					my $len = length($pro) + length($pro2);
 					# right align it, if there is space
-					$pro .= (' 'x($term_width - $len))
+					$pro .= (' 'x($width - $len))
 						.$pro2
-						if $term_width > $len;
+						if $width > $len;
 				} else {
 					$pro .= ' '.$pro2;
 				}
