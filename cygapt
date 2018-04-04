@@ -505,8 +505,11 @@ if (! $root) {
 	exit 10;
 } elsif ($root =~ s{/+$}{}) {
 }
-$target_release = glob2re($target_release)
-	if $target_release;
+if ($target_release) {
+	$target_release = "{$target_release}"
+		if $target_release =~ /,/ && $target_release !~ /{/;
+	$target_release = glob2re($target_release);
+}
 get_setup();
 
 # execute command
@@ -1501,7 +1504,7 @@ sub search {
 
 		my $info = ($p->{tag_ldesc} ? "\n$p->{tag_ldesc}" : "");
 		# indent ldesc
-		$info =~ s{\n}{\n  }gms;
+		$info =~ s{\n}{\n }gms;
 		$info = ($p->{tag_sdesc} ? "$p->{tag_sdesc}" : "").$info;
 
 		next
