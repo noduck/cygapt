@@ -357,7 +357,7 @@ HELP
 			}
 
 			get_available();
-			get_installed();
+			#get_installed();
 			search({ combine => $combine_or ? "||" : "&&" },
 				@ARGV);
 		},
@@ -1865,10 +1865,34 @@ sub get_available {
 		print "Reading package lists... ";
 	}
 
+	my $i = 0;
+	for my $mirror (@{$setup{last_mirror}}) {
+		printf "\rReading package lists... %d%%",
+			$i * 100 / @{$setup{last_mirror}}
+			unless $quiet;
+		get_available_mirror($mirror, $quiet);
+		$i++;
+	}
+
+	print "\rReading package lists... 99%%";
+	for my $p (values %package) {
+		for my $v (values %{$p->{versions}}) {
+			# uniq releases
+			$v->{releases} = [ sort keys
+				%{ { map { $_ => 1 } @{$v->{releases}} } } ];
+		}
+	}
+
+	print "\rReading package lists... Done\n"
+		unless $quiet;
+}
+
+sub get_available_mirror {
+	my ($mirror, $quiet) = @_;
+
 	my $fh;
 	my $setup_name = $root.join("/", 
-		CACHE, uri_escape($setup{last_mirror}[0]),
-		$setup{arch}, "setup.ini");
+		CACHE, uri_escape($mirror), $setup{arch}, "setup.ini");
 
 	unless (open $fh, '<', $setup_name) {
 		print STDERR "E: Cannot open ", $setup_name, ": $!\n";
@@ -1892,13 +1916,13 @@ sub get_available {
 		if (/^\@\s+(\S+)/) {
 			$pack = $1;
 			$rel = 'curr';
-			$vals->{base} = $setup{last_mirror}[0];
+			$vals->{base} = $mirror;
 			next;
 		} elsif (/^\[(\S+)\]/) {
 			# store
 			_available_store($pack, $rel, $vals);
 			$rel = $1;
-			$vals = { base => $setup{last_mirror}[0] };
+			$vals = { base => $mirror };
 			next;
 		} elsif ($key && defined $val) {
 			$val .= "\n$_";
@@ -1916,20 +1940,16 @@ sub get_available {
 			next;
 		}
 
-		#print "Val '$val'\n";
+		# all quotes need to be closed, they are in pairs
 		my $q = () = $val =~ /"/g;
 		next
 			if $q & 1;
 
-		#print "store key $key\n";
 		$vals->{"tag_$key"} = $val;
 		$key = undef;
 	}
 
 	close($fh);
-
-	print "Done\n"
-		unless $quiet;
 }
 
 sub _available_store {
@@ -1974,7 +1994,7 @@ sub _available_store {
 
 	push @{$v->{releases}}, $rel;
 	for my $k (keys %$vals) {
-		$v->{$k} = $vals->{$k};
+		$v->{$k} //= $vals->{$k};
 	}
 }
 
