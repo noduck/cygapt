@@ -1098,11 +1098,9 @@ PACK:		for my $pack (keys %todo) {
 
 		if (keys %todo == $before_count) {
 			# looks like a possible dependency loop, mark the first
-			# package as needed, and try again
-			print STDERR "W: breaking dependency loop\n";
+			# package as not needed, and try again
 			my ($pack) = keys %todo;
 			my $p = $package{$pack};
-			$needed{$pack}++;
 			delete $todo{$pack};
 		}
 	}
@@ -1874,7 +1872,8 @@ sub get_available {
 		$i++;
 	}
 
-	print "\rReading package lists... 99%%";
+	print "\rReading package lists... 99%"
+		unless $quiet;
 	for my $p (values %package) {
 		for my $v (values %{$p->{versions}}) {
 			# uniq releases
