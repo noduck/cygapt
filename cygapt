@@ -912,6 +912,7 @@ sub do_upgrade {
 		}
 		$lst_fh->gzclose;
 	}
+	rename($lst_name, "$lst_name.old");
 
 	unless ($dryrun) {
 		unless ($lst_fh = gzopen($lst_name, 'wb')) {
@@ -962,14 +963,15 @@ sub do_upgrade {
 		print $_
 			if $debug;
 		chomp;
+		# file still present
 		delete $old_file{$_};
 	}
 
 	close($tar_fh);
 	$lst_fh->gzclose;
 
+	# delete remaining files that are not present in upgraded version
 	for my $file (sort { $b cmp $a } keys %old_file) {
-# TODO: how to test this?
 		if ($file =~ m{^etc/postinstall/.*\.sh$}) {
 			unlink "$root/$file";
 			unlink "$root/$file.done";
@@ -987,6 +989,9 @@ sub do_upgrade {
 			if $debug;
 		$post =~ s{^$root}{};
 		my $rc = system($root ? ('chroot', "$root/") : (), $post);
+		# if chroot doesn't work, it will also fail next time
+		last
+			if $root && ($rc >> 8) >= 125;
 		rename($root.$post, "$root$post.done")
 			unless $rc;
 	}
@@ -996,6 +1001,7 @@ sub do_upgrade {
 	delete $p->{versions}{$old_vers}{installed};
 	$p->{versions}{$new_vers}{installed} = 1;
 	write_installed();
+	unlink("$lst_name.old");
 }
 
 sub do_remove {
@@ -1101,6 +1107,7 @@ PACK:		for my $pack (keys %todo) {
 			# package as not needed, and try again
 			my ($pack) = keys %todo;
 			my $p = $package{$pack};
+			push @remove, $pack;
 			delete $todo{$pack};
 		}
 	}
@@ -1439,8 +1446,11 @@ sub list_rdepends {
 			unless ! exists $opt->{rdepends}{$pack};
 			#&& $package{$pack}{v_installed};
 
+		# complain about removal of not installed packages,
+		# unless they are selected by a glob
 		push @not_removed, $pack
-			unless $package{$pack}{v_installed};
+			unless $package{$pack}{v_installed}
+			|| $pack ne $_[$a];
 
 		$opt->{installed_level}{$pack} = $opt->{level}
 			if $package{$pack}{v_installed};
@@ -1455,7 +1465,7 @@ sub list_rdepends {
 		}
 	}
 	for my $pack (@not_removed) {
-		print STDERR "Package '$pack' is not intalled, ",
+		print STDERR "Package '$pack' is not installed, ",
 			"so not removed\n";
 		$rc = 0;
 	}
@@ -1695,6 +1705,7 @@ sub term_width {
 }
 
 sub print_array {
+	local $| = 0;
 	my $width = term_width();
 
 	print " ";
@@ -2066,6 +2077,10 @@ sub http_get {
 		$name =~ s{^.*/}{};
 	}
 
+	my $width = term_width();
+	$name = substr($name, 0, $width - 33 - 3)."..."
+		if length($name) > $width - 33;
+
 	my ($hmac, $match);
 	if (! $hash) {
 	} elsif (length($hash) == 128) {
@@ -2100,7 +2115,6 @@ sub http_get {
 
 	my $data;
 	my $size = 0;
-	my $width = term_width();
 	my $start = time;
 	$http_size //= 0;
 	$http_start = $start
@@ -2202,8 +2216,6 @@ sub http_get {
 		}
 	});
 
-	# clear progress
-	print "\e[K\r";
 	# flush
 	$sub->(undef)
 		if $sub;
@@ -2215,9 +2227,9 @@ sub http_get {
 
 	if ($res->is_success) {
 		if ($match && ! $match->()) {
-			print "Err:$idx $url\n does not verify\n";
+			print "Err:$idx $url\e[K\r\n does not verify\n";
 			unlink("$file.new");
-			print STDERR "W: Failed to match hash $url\n";
+			print STDERR "W: Failed to match hash $url\e[K\r\n";
 			return 0;
 		}
 		if (my $t = $res->header('Last-Modified')) {
@@ -2225,19 +2237,20 @@ sub http_get {
 				utime $t, $t, "$file.new";
 		}
 		rename("$file.new", $file);
-		print "Get:$idx $url\n";
+		print "Get:$idx $url\e[K\r\n";
 		$http_size += $total_size // $size;
 		return $total_size // $size;
 	} elsif ($res->code == 304) {
 		# not modified
-		print "Hit:$idx $url\n";
+		print "Hit:$idx $url\e[K\r\n";
 		unlink("$file.new");
 		$size = -s $file;
 		return $size;
 	} else {
-		print "Err:$idx $url\n ", $res->message, "\n";
+		print "Err:$idx $url\e[K\r\n ", $res->message, "\n";
 		unlink("$file.new");
-		print STDERR "W: Failed to fetch $url ", $res->message, "\n";
+		print STDERR "W: Failed to fetch $url ", $res->message,
+			"\e[K\r\n";
 		return 0;
 	}
 }
