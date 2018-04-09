@@ -16,6 +16,11 @@ use Digest::SHA;
 use Digest::MD5;
 use Data::Dumper;
 
+# TODO: when upgrading, check if it touches any of
+# @DynaLoader::dl_shared_objects (and cygwin, perl_base, ...), if it does,
+# we need to be careful how we upgrade those
+# TODO: add fake entry for cygapt, with depends
+
 use constant {
 	SETUP => "/etc/setup/setup.rc",
 	INSTALLED => "/etc/setup/installed.db",
@@ -262,6 +267,17 @@ HELP
 		},
 	},
 
+	fix => {
+		help => <<HELP,
+Usage: cygapt [options] fix
+
+fixes installation: finds missing dependencies, and installed packages without
+file listing (/etc/setup/<package>.list).
+HELP
+		sub => sub {
+			exit 10;
+		},
+	},
 
 	clean => {
 		help => <<HELP,
@@ -834,6 +850,8 @@ sub make_changes {
 		if (exists $package{$pack} && $package{$pack}{v_target}) {
 			$vers = $package{$pack}{v_target};
 		} else {
+# TODO: each find iterates through all packages, should only do one find
+# for all unknown packages
 			my ($p) = find(substr($post, length($root)));
 			$pack = $p
 				if $p;
