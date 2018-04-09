@@ -825,6 +825,46 @@ sub make_changes {
 		do_upgrade($pack, $package{$pack}{v_installed},
 			$package{$pack}{v_target}, $file{$pack});
 	}
+
+	# run all postinstall
+	for my $post (glob("$root/etc/postinstall/*.sh")) {
+		(my $pack = $post) =~ s{^.*/}{};
+		$pack =~ s{\.sh$}{}i;
+		my $vers;
+		if (exists $package{$pack} && $package{$pack}{v_target}) {
+			$vers = $package{$pack}{v_target};
+		} else {
+			my ($p) = find(substr($post, length($root)));
+			$pack = $p
+				if $p;
+			$vers = $p ? $package{$pack}{v_installed}
+				: '0.0';
+		}
+		logger("set up $pack $vers");
+		print "Setting up $pack ($vers) ...\n";
+		print "running $post\n"
+			if $debug;
+
+		$post =~ s{^$root}{};
+		my $rc = system($root ? ('chroot', "$root/") : (), $post);
+		rename($root.$post, "$root$post.done")
+			unless $rc;
+	}
+
+	# run preremove for packages to be removed
+	for my $pack (@{$changes->{remove_rdeps}},
+			@{$changes->{removes}}) {
+		my $pre = "/etc/preremove/$pack.sh";
+		next
+			unless -f $root.$pre;
+
+		print "running $pre\n"
+			if $debug;
+		my $rc = system($root ? ('chroot', "$root/") : (), $pre);
+		rename($root.$pre, "$root$pre.todo")
+			if $rc;
+	}
+
 	for my $pack (@{$changes->{remove_rdeps}},
 			@{$changes->{removes}}) {
 		do_remove($pack);
@@ -875,17 +915,6 @@ sub do_install {
 
 	close($tar_fh);
 	$lst_fh->gzclose;
-
-	logger("set up $pack $vers");
-	print "Setting up $pack ($vers) ...\n";
-	for my $post (glob("$root/etc/postinstall/*.sh")) {
-		print "running $post\n"
-			if $debug;
-		$post =~ s{^$root}{};
-		my $rc = system($root ? ('chroot', "$root/") : (), $post);
-		rename($root.$post, "$root$post.done")
-			unless $rc;
-	}
 
 	my $p = $package{$pack};
 	$p->{v_installed} = $vers;
@@ -982,20 +1011,6 @@ sub do_upgrade {
 		}
 	}
 
-	print "Setting up $pack ($new_vers) ...\n";
-	logger("set up $pack $new_vers");
-	for my $post (glob("$root/etc/postinstall/*.sh")) {
-		print "running $post\n"
-			if $debug;
-		$post =~ s{^$root}{};
-		my $rc = system($root ? ('chroot', "$root/") : (), $post);
-		# if chroot doesn't work, it will also fail next time
-		last
-			if $root && ($rc >> 8) >= 125;
-		rename($root.$post, "$root$post.done")
-			unless $rc;
-	}
-
 	my $p = $package{$pack};
 	$p->{v_installed} = $new_vers;
 	delete $p->{versions}{$old_vers}{installed};
@@ -1014,15 +1029,6 @@ sub do_remove {
 	if ($dryrun) {
 		print "\tdryrun\n";
 		return;
-	}
-
-	my $pre = "/etc/preremove/$pack.sh";
-	if (-f $root.$pre) {
-		print "running $pre\n"
-			if $debug;
-		my $rc = system($root ? ('chroot', "$root/") : (), $pre);
-		rename($root.$pre, "$root$pre.todo")
-			if $rc;
 	}
 
 	my $lst_fh;
@@ -1548,6 +1554,7 @@ sub find {
 		$a;
 	} @_);
 
+	my @found;
 	for my $pack (sort keys %package) {
 		my $p = $package{$pack};
 		next
@@ -1560,6 +1567,11 @@ sub find {
 			my $cnt = 0;
 			while($lst_fh->gzreadline($line)) {
 				if ($line =~ $re) {
+					if (wantarray) {
+						push @found, $pack;
+						last;
+					}
+
 					$arg_found[$a]++;
 					print "$pack:\n"
 						unless $cnt;
@@ -1568,22 +1580,22 @@ sub find {
 				}
 			}
 			$lst_fh->gzclose;
-
-
 		} else {
 			print STDERR "W: Cannot read $lst_name: $!\n";
 		}
 	}
 
+	return @found
+		if wantarray;
 	my $rc = 1;
 	for my $i (0..$#_) {
 		next
 			if $arg_found[$i];
 		print STDERR "E: Found no package containing files ",
 			"like $_[$i]\n";
-		$rc = 0;
+		@found = ();
 	}
-	return $rc;
+	return @found;
 }
 
 sub files {
@@ -2168,47 +2180,8 @@ sub http_get {
 
 		# overall progress
 		if ($http_total_size) {
-			my $s = $http_size + $size;
-			$pro = sprintf("%d%% ", $s / $http_total_size * 100)
-				.$pro
-				if $http_total_count > 1;
-
-			my $speed = $s / ($now - $http_start);
-			# smooth out calculated download speed
-			$http_speed = $http_speed
-				? $speed * 0.01 + $http_speed * 0.99
-				: $speed;
-
-			if ($now - $http_start > 5) {
-				my $todo = ($http_total_size - $s)
-					/ $http_speed;
-
-				# overall progress
-				use integer;
-				my $pro2 = $todo > 60*60
-					? sprintf("%dh %02dm %02ds",
-						$todo / 60 / 60,
-						($todo / 60) % 60, $todo % 60)
-					: $todo > 60
-					? sprintf("%dm %02ds",
-						$todo / 60, $todo % 60)
-					: sprintf("%ds", $todo);
-				$pro2 = size2t($http_speed)."/s $pro2";
-
-				if ($width) {
-					my $len = length($pro) + length($pro2);
-					# right align it, if there is space
-					$pro .= (' 'x($width - $len))
-						.$pro2
-						if $width > $len;
-				} else {
-					$pro .= ' '.$pro2;
-				}
-			}
-		}
-		
-
-		if ($color) {
+			_http_show_progress($pro, $now, $http_size + $size);
+		} elsif ($color) {
 			print color('yellow'), $pro,
 				color('reset'), "\e[K\r";
 		} else {
@@ -2225,40 +2198,94 @@ sub http_get {
 	$http_end = $end
 		unless $http_end && $http_end > $end;
 
+	my $rc = 0;
 	if ($res->is_success) {
 		if ($match && ! $match->()) {
 			print "Err:$idx $url\e[K\r\n does not verify\n";
 			unlink("$file.new");
 			print STDERR "W: Failed to match hash $url\e[K\r\n";
-			return 0;
+		} else {
+			if (my $t = $res->header('Last-Modified')) {
+					$t = str2time($t);
+					utime $t, $t, "$file.new";
+			}
+			rename("$file.new", $file);
+			print "Get:$idx $url\e[K\r\n";
+			$http_size += $total_size // $size;
+			$rc = $total_size // $size;
 		}
-		if (my $t = $res->header('Last-Modified')) {
-				$t = str2time($t);
-				utime $t, $t, "$file.new";
-		}
-		rename("$file.new", $file);
-		print "Get:$idx $url\e[K\r\n";
-		$http_size += $total_size // $size;
-		return $total_size // $size;
 	} elsif ($res->code == 304) {
 		# not modified
 		print "Hit:$idx $url\e[K\r\n";
 		unlink("$file.new");
 		$size = -s $file;
-		return $size;
+		$rc = $size;
 	} else {
 		print "Err:$idx $url\e[K\r\n ", $res->message, "\n";
 		unlink("$file.new");
 		print STDERR "W: Failed to fetch $url ", $res->message,
 			"\e[K\r\n";
-		return 0;
+	}
+
+	# show overall progress
+	_http_show_progress("", $end, $http_size);
+
+	return $rc;
+}
+
+sub _http_show_progress {
+	my $width = term_width();
+	my ($msg, $now, $s) = @_;
+
+	$msg = sprintf("%d%% ", $s / $http_total_size * 100)
+		.$msg
+		if $http_total_count > 1;
+
+	my $speed = $s / ($now - $http_start);
+	# smooth out calculated download speed
+	$http_speed = $http_speed
+		? $speed * 0.01 + $http_speed * 0.99
+		: $speed;
+
+	if ($now - $http_start > 5) {
+		my $todo = ($http_total_size - $s)
+			/ $http_speed;
+
+		# overall progress
+		use integer;
+		my $pro = $todo > 60*60
+			? sprintf("%dh %02dm %02ds",
+				$todo / 60 / 60,
+				($todo / 60) % 60, $todo % 60)
+			: $todo > 60
+			? sprintf("%dm %02ds",
+				$todo / 60, $todo % 60)
+			: sprintf("%ds", $todo);
+		$pro = size2t($http_speed)."/s $pro";
+
+		if ($width) {
+			my $len = length($msg) + length($pro);
+			# right align it, if there is space
+			$msg .= (' 'x($width - $len))
+				.$pro
+				if $width > $len;
+		} else {
+			$msg .= ' '.$pro;
+		}
+	}
+
+	if ($color) {
+		print color('yellow'), $msg,
+			color('reset'), "\e[K\r";
+	} else {
+		print "$msg\e[K\r";
 	}
 }
 
 sub http_done {
 	return
 		unless $http_size;
-	printf "Fetched %s in %ds (%s/s)\n",
+	printf "Fetched %s in %ds (%s/s)\e[K\n",
 		size2t($http_size), $http_end - $http_start,
 		size2t($http_size / ($http_end - $http_start));
 }
