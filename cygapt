@@ -735,6 +735,15 @@ sub make_changes {
 	my $rc = @{$changes->{removes}}
 		+ @{$changes->{remove_rdeps}};
 
+	my @base = grep { ($package{$_}{tag_category} // '')
+			=~ /(?:^|\s)Base(?:\s|$)/ }
+		@{$changes->{removes}}, @{$changes->{remove_rdeps}};
+	if (@base) {
+		print "Refusing to remove base packages:\n";
+		print_array(@base);
+		exit 10;
+	}
+
 	my %upgrade = (count_only => 1, upgradable => 1);
 	# upgradables should be without target release
 	$target_release = undef;
@@ -2029,8 +2038,9 @@ sub get_available_mirror {
 			$vals->{base} = $mirror;
 			next;
 		} elsif (/^\[(\S+)\]/) {
-			# store
-			_available_store($pack, $rel, $vals);
+			# store only if there was something
+			_available_store($pack, $rel, $vals)
+				if exists $vals->{tag_version};
 			$rel = $1;
 			$vals = { base => $mirror };
 			next;
@@ -2068,6 +2078,8 @@ sub _available_store {
 	unless (exists $vals->{tag_version}) { # && exists $vals->{sdesc}) {
 		print STDERR "W: package $pack doesn't have ",
 			"'version' tag\n";
+		print Dumper($vals)
+			if $debug;
 		return;
 	}
 	my $version = $vals->{tag_version};
@@ -2132,7 +2144,7 @@ sub select_package_versions {
 		$i++;
 	}
 	$target = $v[$i]{tag_version}
-		unless $i > $#v && $v[$i]{releases}[0] eq 'test';
+		unless $i > $#v || $v[$i]{releases}[0] eq 'test';
 	$p->{v_target} = $target;
 
 	$target = undef;
@@ -2325,40 +2337,42 @@ sub _http_show_progress {
 	my $width = term_width();
 	my ($msg, $now, $s) = @_;
 
-	$msg = sprintf("%d%% ", $s / $http_total_size * 100)
-		.$msg
-		if $http_total_count > 1;
+	if ($http_total_size) {
+		$msg = sprintf("%d%% ", $s / $http_total_size * 100)
+			.$msg
+			if $http_total_count > 1;
 
-	my $speed = $s / ($now - $http_start);
-	# smooth out calculated download speed
-	$http_speed = $http_speed
-		? $speed * 0.01 + $http_speed * 0.99
-		: $speed;
+		my $speed = $s / ($now - $http_start);
+		# smooth out calculated download speed
+		$http_speed = $http_speed
+			? $speed * 0.01 + $http_speed * 0.99
+			: $speed;
 
-	if ($now - $http_start > 5) {
-		my $todo = ($http_total_size - $s)
-			/ $http_speed;
+		if ($now - $http_start > 5) {
+			my $todo = ($http_total_size - $s)
+				/ $http_speed;
 
-		# overall progress
-		use integer;
-		my $pro = $todo > 60*60
-			? sprintf("%dh %02dm %02ds",
-				$todo / 60 / 60,
-				($todo / 60) % 60, $todo % 60)
-			: $todo > 60
-			? sprintf("%dm %02ds",
-				$todo / 60, $todo % 60)
-			: sprintf("%ds", $todo);
-		$pro = size2t($http_speed)."/s $pro";
+			# overall progress
+			use integer;
+			my $pro = $todo > 60*60
+				? sprintf("%dh %02dm %02ds",
+					$todo / 60 / 60,
+					($todo / 60) % 60, $todo % 60)
+				: $todo > 60
+				? sprintf("%dm %02ds",
+					$todo / 60, $todo % 60)
+				: sprintf("%ds", $todo);
+			$pro = size2t($http_speed)."/s $pro";
 
-		if ($width) {
-			my $len = length($msg) + length($pro);
-			# right align it, if there is space
-			$msg .= (' 'x($width - $len))
-				.$pro
-				if $width > $len;
-		} else {
-			$msg .= ' '.$pro;
+			if ($width) {
+				my $len = length($msg) + length($pro);
+				# right align it, if there is space
+				$msg .= (' 'x($width - $len))
+					.$pro
+					if $width > $len;
+			} else {
+				$msg .= ' '.$pro;
+			}
 		}
 	}
 
