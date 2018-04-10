@@ -19,7 +19,6 @@ use Data::Dumper;
 # TODO: when upgrading, check if it touches any of
 # @DynaLoader::dl_shared_objects (and cygwin, perl_base, ...), if it does,
 # we need to be careful how we upgrade those
-# TODO: add fake entry for cygapt, with depends
 
 use constant {
 	SETUP => "/etc/setup/setup.rc",
@@ -27,9 +26,41 @@ use constant {
 	# not using the cache from setup.ini
 	CACHE => "/var/cache/cygapt",
 	LOG => "/var/log/cygapt.log",
-	VERSION => "0.2",
+	VERSION => "0.5",
 };
-my (%setup, %package);
+my %setup;
+my %package = ( cygapt => {
+	name => 'cygapt',
+	installed => 1,
+	v_installed => VERSION,
+	v_target => VERSION,
+	v_latest => VERSION,
+	tag_category => qw(Base),
+	tag_ldesc => 
+"cygapt is a commandline package manager for Cygwin, that tried to provide
+a similar interface as APT on Debian. cygapt currently supports:
+-installing packages
+-removing packages
+-upgrading packages
+-automatically removing packages that are no longer needed LDESC",
+	tag_sdesc => 'package manager for Cygwin, similar to Debian APT',
+	picked => 0,
+});
+
+my $v = $package{cygapt}{versions}{"".VERSION} = {
+	tag_version => VERSION,
+	va => v2va(VERSION),
+	version_idx => 0,
+	releases => [ 'curr', 'now' ],
+	deps => [qw(perl-Compress-Bzip2
+		perl-Digest-SHA perl-Scalar-List-Utils
+		perl-TermReadKey perl-libwww-perl)],
+	installed => 1,
+};
+$v->{tag_depends2} = join(", ", @{$v->{deps}});
+$package{cygapt}{tag_requires} = join(" ", @{$v->{deps}});
+$package{cygapt}{versions_sorted} = [ $v ];
+
 # fields in order (not showing install and source)
 my @field = (qw(sdesc ldesc category requires version depends2));
 
@@ -466,6 +497,7 @@ HELP
 my %command = @command;
 $command{dist_upgrade} = $command{upgrade};
 $command{auto_remove} = $command{autoremove};
+$command{my_deps}{sub} = \&my_deps;
 
 my %all_opts = %common_opt;
 for my $c (values %command) {
@@ -1695,6 +1727,44 @@ sub mark {
 		$rc = 0;
 	}
 	return $rc;
+}
+
+sub my_deps {
+use DynaLoader;
+	print STDERR "W: my-deps may give wrong results with --root\n"
+		if $root;
+	get_available();
+	build_tree();
+	get_installed();
+
+	my @files = values %INC;
+	push @files, @DynaLoader::dl_shared_objects;
+
+	my $ldd = `ldd /usr/bin/perl`;
+	push @files, ($ldd =~ m{=> (/.*?\.dll)}gmis);
+
+	if ($debug) {
+		$| = 1;
+		print "Files:\n";
+		print_array(@files);
+		find(@files);
+	}
+
+	my %pack = map { $_ => 1 } find(@files);
+	if ($debug) {
+		print "full cygapt dependencies:\n";
+		print_array(sort keys %pack);
+	}
+
+	# simplify
+	for my $pack (keys %pack) {
+		my $p = $package{$pack};
+		for my $dep (@{$p->{versions}{$p->{v_installed}}{deps}}) {
+			delete $pack{$dep};
+		}
+	}
+	print "cygapt depends on:\n";
+	print_array(sort keys %pack);
 }
 
 sub get_setup {
