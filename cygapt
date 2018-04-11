@@ -19,6 +19,24 @@ use Data::Dumper;
 # TODO: when upgrading, check if it touches any of
 # @DynaLoader::dl_shared_objects (and cygwin, perl_base, ...), if it does,
 # we need to be careful how we upgrade those
+# if not, we get the following errors
+#Preparing to unpack .../perl_base-5.26.1-1.tar.xz ...
+#Unpacking perl_base (5.26.1-1) over (5.22.3-1) ...
+#Setting up perl_base (5.26.1-1) ...
+#Preparing to unpack .../ncurses-6.0-12.20171125.tar.xz ...
+#Unpacking ncurses (6.0-12.20171125) over (6.0-10.20170325) ...
+#      4 [main] perl 4596 child_info_fork::abort: C:\Cygwin\bin\cygperl5_26.dll: Loaded to different address: parent(0x3F2FF0000) != child(0x465770000)
+#Can't fork, trying again in 5 seconds at ./cygapt line 585, <$installed_fh> line 26.
+#
+#Preparing to unpack .../perl-Compress-Bzip2-2.26-2.tar.xz ...
+#Unpacking perl-Compress-Bzip2 (2.26-2) over (2.26-1) ...
+#Setting up perl-Compress-Bzip2 (2.26-2) ...
+#Preparing to unpack .../perl-Devel-Symdump-2.18-2.tar.xz ...
+#Unpacking perl-Devel-Symdump (2.18-2) over (2.18-1) ...
+#    295 [main] perl 7552 child_info_fork::abort: C:\Cygwin\lib\perl5\vendor_perl\5.26\x86_64-cygwin-threads\auto\Compress\Bzip2\Bzip2.dll: Loaded to different address: parent(0x3EC3D0000) != child(0x55A250000)
+#Can't fork, trying again in 5 seconds at ./cygapt line 585, <$installed_fh> line 16.
+#
+
 
 use constant {
 	SETUP => "/etc/setup/setup.rc",
@@ -306,7 +324,17 @@ fixes installation: finds missing dependencies, and installed packages without
 file listing (/etc/setup/<package>.list).
 HELP
 		sub => sub {
-			exit 10;
+			if (@ARGV) {
+				print STDERR "E: The autoremove command ",
+					"takes no arguments\n";
+				exit 10;
+			}
+
+			get_available();
+			build_tree();
+			get_installed();
+			my $changes = fix();
+			make_changes($changes);
 		},
 	},
 
@@ -495,6 +523,10 @@ HELP
 	},
 );
 my %command = @command;
+
+# aliases and hidden commands
+$command{deps} = $command{depends};
+$command{rdeps} = $command{rdepends};
 $command{dist_upgrade} = $command{upgrade};
 $command{auto_remove} = $command{autoremove};
 $command{my_deps}{sub} = \&my_deps;
@@ -836,7 +868,7 @@ sub make_changes {
 	#	? "232 kB of additional disk space will be used.\n"
 	#	: "13.1 MB disk space will be freed.\n";
 
-	if ($ask && ! $yes) {
+	if (($ask || $changes->{ask}) && ! $yes) {
 		local $| = 1;
 		print "Do you want to continue? [Y/n] ";
 		$_ = <STDIN>;
@@ -891,8 +923,6 @@ sub make_changes {
 		if (exists $package{$pack} && $package{$pack}{v_target}) {
 			$vers = $package{$pack}{v_target};
 		} else {
-# TODO: each find iterates through all packages, should only do one find
-# for all unknown packages
 			my ($p) = find(substr($post, length($root)));
 			$pack = $p
 				if $p;
@@ -1016,25 +1046,6 @@ sub do_upgrade {
 	}
 
 	my $tar_fh;
-# TODO: error here; upgrade replace a Perl dll, and then child loads newer...
-#
-#Preparing to unpack .../perl_base-5.26.1-1.tar.xz ...
-#Unpacking perl_base (5.26.1-1) over (5.22.3-1) ...
-#Setting up perl_base (5.26.1-1) ...
-#Preparing to unpack .../ncurses-6.0-12.20171125.tar.xz ...
-#Unpacking ncurses (6.0-12.20171125) over (6.0-10.20170325) ...
-#      4 [main] perl 4596 child_info_fork::abort: C:\Cygwin\bin\cygperl5_26.dll: Loaded to different address: parent(0x3F2FF0000) != child(0x465770000)
-#Can't fork, trying again in 5 seconds at ./cygapt line 585, <$installed_fh> line 26.
-#
-#Preparing to unpack .../perl-Compress-Bzip2-2.26-2.tar.xz ...
-#Unpacking perl-Compress-Bzip2 (2.26-2) over (2.26-1) ...
-#Setting up perl-Compress-Bzip2 (2.26-2) ...
-#Preparing to unpack .../perl-Devel-Symdump-2.18-2.tar.xz ...
-#Unpacking perl-Devel-Symdump (2.18-2) over (2.18-1) ...
-#    295 [main] perl 7552 child_info_fork::abort: C:\Cygwin\lib\perl5\vendor_perl\5.26\x86_64-cygwin-threads\auto\Compress\Bzip2\Bzip2.dll: Loaded to different address: parent(0x3EC3D0000) != child(0x55A250000)
-#Can't fork, trying again in 5 seconds at ./cygapt line 585, <$installed_fh> line 16.
-#
-
 	unless (open $tar_fh, '-|',
 		'tar', '-C', "$root/",
 		$tar =~ m{\.gz} ? '-z'
@@ -1178,6 +1189,49 @@ PACK:		for my $pack (keys %todo) {
 	}
 
 	return \@remove;
+}
+
+sub fix {
+	my (%add, %dep);
+	for my $p (grep { $_->{v_installed} } values %package) {
+		my $pack = $p->{name};
+
+		my $lst_name = $root."/etc/setup/$pack.lst.gz";
+		unless (-e $lst_name || $pack eq 'cygapt') {
+			print STDERR "W: Cannot read $lst_name: $!\n";
+			$add{$pack}++;
+		}
+
+		my $v = $p->{versions}{$p->{v_installed}};
+		for my $dep (@{$v->{deps}}) {
+			next
+				if exists $package{$dep}
+				&& $package{$dep}{v_installed};
+			print STDERR "W: Dependency $dep of package $pack is ",
+				"not installed\n";
+
+			my $depp = $package{$dep};
+			select_package_versions($depp, 'now', undef);
+
+			# make minimal changes, only pull in missing deps
+			my $depv = $depp->{versions}{$depp->{v_target}};
+			$add{$dep}++;
+			for my $depdep (@{$depv->{deps}}) {
+				my $depdepp = $package{$depdep};
+				next
+					if $depdepp->{v_installed};
+				select_package_versions($depdepp, undef, undef);
+				$dep{$depdep}++;
+			}
+		}
+	}
+
+	map delete $dep{$_}, keys %add;
+	my $changes = keys %dep ? upgradable(keys %dep) : { };
+	$changes->{ask} = 1;
+	push @{$changes->{installs}}, keys %add;
+
+	return $changes;
 }
 
 sub build_tree {
@@ -1604,6 +1658,12 @@ sub search {
 }
 
 sub find {
+	state %file2pack;
+
+	# if not a glob, and we already parsed all lst, keep it simple
+	return $file2pack{$_[0]}
+		if keys %file2pack && @_ == 1 && $_[0] !~ /[*?{}]/;
+
 	my @arg_found;
 	my $re = argv2re(map {
 		# drop first slash
@@ -1612,6 +1672,13 @@ sub find {
 			unless $a =~ s{^/+}{};
 		$a;
 	} @_);
+
+	if (keys %file2pack) {
+		for my $file (keys %file2pack) {
+			return $file2pack{$file}
+				if $file =~ $re;
+		}
+	}
 
 	my @found;
 	for my $pack (sort keys %package) {
@@ -1625,6 +1692,8 @@ sub find {
 			my $line;
 			my $cnt = 0;
 			while($lst_fh->gzreadline($line)) {
+				$file2pack{$line} = $pack;
+
 				if ($line =~ $re) {
 					if (wantarray) {
 						push @found, $pack;
