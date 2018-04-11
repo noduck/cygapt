@@ -2279,6 +2279,13 @@ sub http_get {
 	state $idx = 0;
 	$idx++;
 
+	my $start = time;
+	$http_size //= 0;
+	$http_start = $start
+		unless $http_start && $http_start < $start;
+	_http_show_progress("[$idx $name Waiting for headers]", $start,
+		$http_size);
+
 	my $fh;
 	(my $dir = $file) =~ s{[^/]+$}{};
 	mkdir_p($dir);
@@ -2296,10 +2303,6 @@ sub http_get {
 
 	my $data;
 	my $size = 0;
-	my $start = time;
-	$http_size //= 0;
-	$http_start = $start
-		unless $http_start && $http_start < $start;
 	my $res = $ua->request($req, sub {
 		my ($data) = @_;
 		$data = $sub->($data)
@@ -2397,7 +2400,8 @@ sub http_get {
 	}
 
 	# show overall progress
-	_http_show_progress("", $end, $http_size);
+	_http_show_progress("", $end, $http_size)
+		if $http_total_count && $idx < $http_total_count;
 
 	return $rc;
 }
@@ -2405,13 +2409,20 @@ sub http_get {
 sub _http_show_progress {
 	my $width = term_width();
 	my ($msg, $now, $s) = @_;
+	state $last_msg;
+	if ($msg) {
+		$last_msg = $msg;
+	} else {
+		$msg = $last_msg;
+	}
+	$s ||= 0;
 
 	if ($http_total_size) {
 		$msg = sprintf("%d%% ", $s / $http_total_size * 100)
 			.$msg
 			if $http_total_count > 1;
 
-		my $speed = $s / ($now - $http_start);
+		my $speed = $now = $http_start ? 0 : $s / ($now - $http_start);
 		# smooth out calculated download speed
 		$http_speed = $http_speed
 			? $speed * 0.01 + $http_speed * 0.99
@@ -2454,9 +2465,10 @@ sub _http_show_progress {
 }
 
 sub http_done {
+	printf "\e[K";
 	return
 		unless $http_size;
-	printf "Fetched %s in %ds (%s/s)\e[K\n",
+	printf "Fetched %s in %ds (%s/s)\n",
 		size2t($http_size), $http_end - $http_start,
 		size2t($http_size / ($http_end - $http_start));
 }
