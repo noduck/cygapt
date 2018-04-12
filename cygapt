@@ -1046,16 +1046,18 @@ sub do_upgrade {
 	}
 
 	my $tar_fh;
+	alarm(4);
 	unless (open $tar_fh, '-|',
 		'tar', '-C', "$root/",
 		$tar =~ m{\.gz} ? '-z'
 			: $tar =~ m{\.bz2} ? '-j'
-			: $tar =~ m{\.bz2} ? '-J'
+			: $tar =~ m{\.xz} ? '-J'
 			: (),
 		'-vxf', $tar) {
 		print STDERR "E: Cannot start tar $tar: $!\n";
 		exit 10;
 	}
+	alarm(0);
 
 	while(<$tar_fh>) {
 		$lst_fh->gzwrite($_);
@@ -1118,7 +1120,7 @@ sub do_remove {
 		}
 		$lst_fh->gzclose;
 		unlink($lst_name);
-	} else {
+	} elsif ($pack ne 'cygapt') {
 		print STDERR "W: Cannot read $lst_name: $!\n";
 	}
 
@@ -1708,7 +1710,7 @@ sub find {
 				}
 			}
 			$lst_fh->gzclose;
-		} else {
+		} elsif ($pack ne 'cygapt') {
 			print STDERR "W: Cannot read $lst_name: $!\n";
 		}
 	}
@@ -2230,12 +2232,13 @@ sub select_package_versions {
 	}
 
 	# only pick new target if it is newer, or we can downgrade (or no
-	# prior target)
+	# prior target) and we have a download
 	$p->{v_target} = $target
 		if $target && ($downgrades
 			|| ! $p->{v_target}
 			|| $p->{versions}{$target}{version_idx} <
-				$p->{versions}{$p->{v_target}}{version_idx});
+				$p->{versions}{$p->{v_target}}{version_idx})
+		&& $p->{versions}{$target}{tag_install};
 }
 
 my ($http_total_size, $http_total_count, $http_size, $http_start, $http_end,
@@ -2400,8 +2403,8 @@ sub http_get {
 	}
 
 	# show overall progress
-	_http_show_progress("", $end, $http_size)
-		if $http_total_count && $idx < $http_total_count;
+	_http_show_progress(undef, $end, $http_size)
+		if $http_total_count && $idx < $http_total_count && $rc;
 
 	return $rc;
 }
@@ -2422,7 +2425,7 @@ sub _http_show_progress {
 			.$msg
 			if $http_total_count > 1;
 
-		my $speed = $now = $http_start ? 0 : $s / ($now - $http_start);
+		my $speed = $now == $http_start ? 0 : $s / ($now - $http_start);
 		# smooth out calculated download speed
 		$http_speed = $http_speed
 			? $speed * 0.01 + $http_speed * 0.99
@@ -2442,7 +2445,7 @@ sub _http_show_progress {
 				? sprintf("%dm %02ds",
 					$todo / 60, $todo % 60)
 				: sprintf("%ds", $todo);
-			$pro = size2t($http_speed)."/s $pro";
+			$pro = size2t($http_speed)."/s $pro ";
 
 			if ($width) {
 				my $len = length($msg) + length($pro);
