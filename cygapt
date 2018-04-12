@@ -983,26 +983,7 @@ sub do_install {
 		print "\tdryrun\n";
 		return;
 	}
-
-	my $tar_fh;
-	unless (open $tar_fh, '-|',
-		'tar', '-C', "$root/",
-		$tar =~ m{\.gz} ? '-z'
-			: $tar =~ m{\.bz2} ? '-j'
-			: $tar =~ m{\.bz2} ? '-J'
-			: (),
-		'-vxf', $tar) {
-		print STDERR "E: Cannot start tar $tar: $!\n";
-		exit 10;
-	}
-
-	while(<$tar_fh>) {
-		$lst_fh->gzwrite($_);
-		print $_
-			if $debug;
-	}
-
-	close($tar_fh);
+	do_extract($tar, $lst_fh);
 	$lst_fh->gzclose;
 
 	my $p = $package{$pack};
@@ -1045,30 +1026,10 @@ sub do_upgrade {
 		return;
 	}
 
-	my $tar_fh;
-	alarm(4);
-	unless (open $tar_fh, '-|',
-		'tar', '-C', "$root/",
-		$tar =~ m{\.gz} ? '-z'
-			: $tar =~ m{\.bz2} ? '-j'
-			: $tar =~ m{\.xz} ? '-J'
-			: (),
-		'-vxf', $tar) {
-		print STDERR "E: Cannot start tar $tar: $!\n";
-		exit 10;
-	}
-	alarm(0);
-
-	while(<$tar_fh>) {
-		$lst_fh->gzwrite($_);
-		print $_
-			if $debug;
-		chomp;
+	do_extract($tar, $lst_fh, sub {
 		# file still present
 		delete $old_file{$_};
-	}
-
-	close($tar_fh);
+	});
 	$lst_fh->gzclose;
 
 	# delete remaining files that are not present in upgraded version
@@ -1089,6 +1050,37 @@ sub do_upgrade {
 	$p->{versions}{$new_vers}{installed} = 1;
 	write_installed();
 	unlink("$lst_name.old");
+}
+
+sub do_extract {
+	my ($tar, $lst_fh, $sub) = @_;
+
+	my $tar_fh;
+	alarm(4);
+	my @exec = ('tar', '-C', "$root/",
+		$tar =~ m{\.gz} ? '--gzip'
+			: $tar =~ m{\.bz2} ? '--bzip2'
+			: $tar =~ m{\.xz} ? '--xz'
+			: (),
+		'-vxf', $tar);
+	print STDERR "Extract: @exec\n"
+		if $debug;
+	unless (open $tar_fh, '-|', @exec) {
+		print STDERR "E: Cannot start tar $tar: $!\n";
+		exit 10;
+	}
+	alarm(0);
+
+	while(<$tar_fh>) {
+		$lst_fh->gzwrite($_);
+		print $_
+			if $debug;
+		chomp;
+		$sub->($_)
+			if $sub;
+	}
+
+	close($tar_fh);
 }
 
 sub do_remove {
