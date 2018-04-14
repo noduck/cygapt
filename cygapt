@@ -844,7 +844,7 @@ sub make_changes {
 
 		my $v = $p->{versions}{$p->{v_target}};
 		unless ($v->{tag_install}) {
-			print STDERR "Cannot install package $pack ",
+			print STDERR "E: Cannot install package $pack ",
 				"version $p->{v_target}: no downloadable ",
 				"copy found\n";
 			exit 10;
