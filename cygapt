@@ -1192,7 +1192,8 @@ sub fix {
 
 		my $lst_name = $root."/etc/setup/$pack.lst.gz";
 		unless (-e $lst_name || $pack eq 'cygapt') {
-			print STDERR "W: Cannot read $lst_name: $!\n";
+			print STDERR "W: Cannot read file list for package ",
+				"$pack; $lst_name: $!\n";
 			$add{$pack}++;
 		}
 
