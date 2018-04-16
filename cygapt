@@ -715,6 +715,7 @@ sub update {
 
 	http_done();
 
+	$| = 1;
 	print "Reading state information... ";
 	get_installed(\'quiet');
 	get_available(\'quiet');
