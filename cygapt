@@ -2706,6 +2706,6 @@ General options:
   -s, -n, --dry-run	make no changes
   -h, --help		this help, or help about a command
   -root=ROOT		root directory of installation to act upon
-  -d, --debug
+  -D, --debug
 OPTIONS
 }
