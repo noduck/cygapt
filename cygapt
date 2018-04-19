@@ -1378,6 +1378,13 @@ sub upgradable {
 	for my $i (0..$#_) {
 		next
 			if $arg_found[$i];
+		if ($_[$i] =~ m{\.tar\.[a-z09]+}i && -f $_[$i]) {
+			print "Done\n";
+			$quiet = 1;
+			print "W: selecting file \"$_[$i]\"\n";
+# TODO: split into filename into package-name and version, add to the
+# available list (with local URL), and include in @upgrade
+		}
 		unless ($quiet) {
 			print "Done\n";
 			$quiet = 1;
