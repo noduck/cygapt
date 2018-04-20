@@ -6,6 +6,7 @@ use feature qw(:5.20);
 use Getopt::Long qw(:config bundling no_ignore_case);
 use Fcntl qw(:flock SEEK_SET SEEK_END);
 use LWP;
+use POSIX qw();
 use Compress::Zlib;
 use Compress::Bzip2;
 use POSIX qw(uname);
@@ -14,6 +15,7 @@ use Term::ReadKey;
 use HTTP::Date qw(time2str str2time);
 use Digest::SHA;
 use Digest::MD5;
+use DynaLoader;
 use Data::Dumper;
 
 # TODO: when upgrading, check if it touches any of
@@ -85,6 +87,10 @@ my @field = (qw(sdesc ldesc category requires version depends2));
 my ($dryrun, $verbose, $help);
 my $debug = 0;
 my $root = '';
+# there may be scenarios were we end up overwriting our own dependencies (DLLs)
+# and as a result can no longer fork (cygwin limitation), at that time we
+# should try to restart
+my $restart_needed;
 
 my %common_opt = (
 	"s|simulate|n|dry-run" => \$dryrun,
@@ -844,7 +850,11 @@ sub make_changes {
 		}
 
 		my $v = $p->{versions}{$p->{v_target}};
-		unless ($v->{tag_install}) {
+		if (exists $v->{local_file}) {
+			$file{$pack} = $v->{local_file};
+			$total_size += -s $v->{local_file};
+			next;
+		} elsif (! $v->{tag_install}) {
 			print STDERR "E: Cannot install package $pack ",
 				"version $p->{v_target}: no downloadable ",
 				"copy found\n";
@@ -913,13 +923,19 @@ sub make_changes {
 	for my $pack (@{$changes->{install_deps}},
 			@{$changes->{upgrade_deps}}) {
 		do_install($pack, $package{$pack}{v_target}, $file{$pack}, 0);
-	}
-	for my $pack (@{$changes->{installs}}) {
-		do_install($pack, $package{$pack}{v_target}, $file{$pack}, 1);
+		if ($restart_needed) {
+		}
 	}
 	for my $pack (@{$changes->{upgrades}}) {
 		do_upgrade($pack, $package{$pack}{v_installed},
 			$package{$pack}{v_target}, $file{$pack});
+		if ($restart_needed) {
+		}
+	}
+	for my $pack (@{$changes->{installs}}) {
+		do_install($pack, $package{$pack}{v_target}, $file{$pack}, 1);
+		if ($restart_needed) {
+		}
 	}
 
 	# run all postinstall
@@ -1061,9 +1077,9 @@ sub do_upgrade {
 
 sub do_extract {
 	my ($tar, $lst_fh, $sub) = @_;
+	my $my_dlls = my_dlls();
 
 	my $tar_fh;
-	alarm(4);
 	my @exec = ('tar', '-C', "$root/",
 		$tar =~ m{\.gz} ? '--gzip'
 			: $tar =~ m{\.bz2} ? '--bzip2'
@@ -1072,11 +1088,29 @@ sub do_extract {
 		'-vxf', $tar);
 	print STDERR "Extract: @exec\n"
 		if $debug;
-	unless (open $tar_fh, '-|', @exec) {
-		print STDERR "E: Cannot start tar $tar: $!\n";
+
+	eval {
+		POSIX::sigaction(POSIX::SIGALRM, POSIX::SigAction->new(
+			sub { die "Alarm"; },
+			0, POSIX::SA_SIGINFO));
+		eval {
+			alarm(2);
+			unless (open $tar_fh, '-|', @exec) {
+				print STDERR "E: Cannot start tar $tar: $!\n";
+				exit 10;
+			}
+			alarm(0);
+		};
+		die $@ if $@;
+	};
+	if (! $@) {
+	} elsif ($@ =~ /Alarm/) {
+		print STDERR "E: Failed to start tar to extract $tar\n";
+		print STDERR "Please restart cygapt\n";
 		exit 10;
+	} else {
+		die $@;
 	}
-	alarm(0);
 
 	while(<$tar_fh>) {
 		$lst_fh->gzwrite($_);
@@ -1085,6 +1119,12 @@ sub do_extract {
 		chomp;
 		$sub->($_)
 			if $sub;
+		chomp;
+		if (exists $my_dlls->{"/$_"}) {
+			print STDERR "W: overwriting one of my DLLs: $_\n";
+			# next fork might fail
+			$restart_needed = 1;
+		}
 	}
 
 	close($tar_fh);
@@ -1378,12 +1418,32 @@ sub upgradable {
 	for my $i (0..$#_) {
 		next
 			if $arg_found[$i];
-		if ($_[$i] =~ m{\.tar\.[a-z09]+}i && -f $_[$i]) {
-			print "Done\n";
+		if ($_[$i] =~ m{\.tar\.(?:gz|bzip2|xz)}i && -f $_[$i]) {
+			print "Done\n"
+				unless $quiet;
 			$quiet = 1;
-			print "W: selecting file \"$_[$i]\"\n";
-# TODO: split into filename into package-name and version, add to the
-# available list (with local URL), and include in @upgrade
+
+			my $file = $_[$i];
+			my ($pack, $vers) = pack_vers_from_file($_[$i]);
+			if ($pack && $vers) {
+				print "W: selecting package \"$pack\" ",
+					"version \"$vers\" from file ",
+					"$_[$i]\n";
+				_available_store($pack, 'file', {
+					tag_version => $vers,
+					local_file => $_[$i],
+				});
+				$package{$pack}{v_target} = $vers;
+				if (! $package{$pack}{v_installed}) {
+					$install{$pack}++;
+				} elsif ($package{$pack}{v_installed}
+					ne $vers) {
+					push @upgrade, $pack;
+				} else {
+					push @reinstall, $pack;
+				}
+				next;
+			}
 		}
 		unless ($quiet) {
 			print "Done\n";
@@ -1817,18 +1877,13 @@ sub mark {
 }
 
 sub my_deps {
-use DynaLoader;
 	print STDERR "W: my-deps may give wrong results with --root\n"
 		if $root;
 	get_available();
 	build_tree();
 	get_installed();
 
-	my @files = values %INC;
-	push @files, @DynaLoader::dl_shared_objects;
-
-	my $ldd = `ldd /usr/bin/perl`;
-	push @files, ($ldd =~ m{=> (/.*?\.dll)}gmis);
+	my @files = (values %INC, keys %{ my_dlls() });
 
 	if ($debug) {
 		$| = 1;
@@ -1838,7 +1893,7 @@ use DynaLoader;
 	}
 
 	my %pack = map { $_ => 1 } find(@files);
-	if ($debug) {
+	if ($debug || $verbose) {
 		print "full cygapt dependencies:\n";
 		print_array(sort keys %pack);
 	}
@@ -1852,6 +1907,19 @@ use DynaLoader;
 	}
 	print "cygapt depends on:\n";
 	print_array(sort keys %pack);
+}
+
+sub my_dlls {
+	state $dlls;
+	return $dlls
+		if $dlls;
+
+	map $dlls->{$_} = $_, @DynaLoader::dl_shared_objects;
+
+	my $ldd = `ldd /usr/bin/perl`;
+	map $dlls->{$_} = $_, ($ldd =~ m{=> (/.*?\.dll)}gmis);
+
+	return $dlls;
 }
 
 sub get_setup {
@@ -2248,6 +2316,28 @@ sub select_package_versions {
 		&& $p->{versions}{$target}{tag_install};
 }
 
+sub pack_vers_from_file {
+	my ($file) = @_;
+	$file =~ s{^.*/}{};
+	$file =~ s{\.tar\.(?:gz|bzip2|xz)$}{}i;
+	(my $pre = $file) =~ s/-.*$//;
+
+	# longest matched package name
+	my $len = -1;
+	for my $pack (grep /^$pre/, keys %package) {
+		next
+			unless substr($file, 0, length($pack)) eq $pack
+			&& length($pack) > $len;
+		$len = length($pack);
+	}
+
+	if ($len > 0) {
+		return (substr($file, 0, $len), substr($file, $len+1));
+	} else {
+		return (undef, undef);
+	}
+}
+
 my ($http_total_size, $http_total_count, $http_size, $http_start, $http_end,
 	$http_speed);
 
@@ -2562,7 +2652,9 @@ sub argv2pack_re {
 
 	my $opt = @_ && ref $_[0] eq 'HASH' ? shift @_ : { };
 	my (@re, @t_rel, @t_ver);
-	for (@_) {
+	for my $a (@_) {
+		# don't clobber contents of original array
+		local $_ = $a;
 		if (! $opt->{installed}) {
 		} elsif (m{[=/](\S+)}) {
 			print STDERR "E: Can only match installed ",
