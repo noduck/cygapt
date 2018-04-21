@@ -18,26 +18,6 @@ use Digest::MD5;
 use DynaLoader;
 use Data::Dumper;
 
-# TODO: when upgrading, check if it touches any of
-# @DynaLoader::dl_shared_objects (and cygwin, perl_base, ...), if it does,
-# we need to be careful how we upgrade those
-# if not, we get the following errors
-#Preparing to unpack .../perl_base-5.26.1-1.tar.xz ...
-#Unpacking perl_base (5.26.1-1) over (5.22.3-1) ...
-#Setting up perl_base (5.26.1-1) ...
-#Preparing to unpack .../ncurses-6.0-12.20171125.tar.xz ...
-#Unpacking ncurses (6.0-12.20171125) over (6.0-10.20170325) ...
-#      4 [main] perl 4596 child_info_fork::abort: C:\Cygwin\bin\cygperl5_26.dll: Loaded to different address: parent(0x3F2FF0000) != child(0x465770000)
-#Can't fork, trying again in 5 seconds at ./cygapt line 585, <$installed_fh> line 26.
-#
-#Preparing to unpack .../perl-Compress-Bzip2-2.26-2.tar.xz ...
-#Unpacking perl-Compress-Bzip2 (2.26-2) over (2.26-1) ...
-#Setting up perl-Compress-Bzip2 (2.26-2) ...
-#Preparing to unpack .../perl-Devel-Symdump-2.18-2.tar.xz ...
-#Unpacking perl-Devel-Symdump (2.18-2) over (2.18-1) ...
-#    295 [main] perl 7552 child_info_fork::abort: C:\Cygwin\lib\perl5\vendor_perl\5.26\x86_64-cygwin-threads\auto\Compress\Bzip2\Bzip2.dll: Loaded to different address: parent(0x3EC3D0000) != child(0x55A250000)
-#Can't fork, trying again in 5 seconds at ./cygapt line 585, <$installed_fh> line 16.
-#
 
 
 use constant {
@@ -837,7 +817,7 @@ sub make_changes {
 		unless $uc || $nc || $rc;
 
 	my @get;
-	my %file;
+	my $files;
 	my ($get_size, $total_size) = (0, 0);
 	for my $pack (sort @{$changes->{installs}},
 			@{$changes->{install_deps}},
@@ -852,7 +832,7 @@ sub make_changes {
 
 		my $v = $p->{versions}{$p->{v_target}};
 		if (exists $v->{local_file}) {
-			$file{$pack} = $v->{local_file};
+			$files->{$pack} = $v->{local_file};
 			$total_size += -s $v->{local_file};
 			next;
 		} elsif (! $v->{tag_install}) {
@@ -864,7 +844,7 @@ sub make_changes {
 		my @install = split /\s+/, $v->{tag_install};
 		my $file = $root.join("/", CACHE, uri_escape($v->{base}),
 			$install[0]);
-		$file{$pack} = $file;
+		$files->{$pack} = $file;
 		$total_size += $install[1];
 		next
 			if -f $file;
@@ -921,31 +901,34 @@ sub make_changes {
 		return;
 	}
 
-	make_changes2($changes, \%file);
+	make_changes2($changes, $files);
 }
 
 sub make_changes2 {
-	my ($changes, $file) = @_;
+	my ($changes, $files) = @_;
 
 	while(my $pack = shift @{$changes->{install_deps}}) {
-		do_install($pack, $package{$pack}{v_target}, $file->{$pack}, 0);
-		restart_changes($changes, $file)
+		do_install($pack, $package{$pack}{v_target},
+			$files->{$pack}, 0);
+		restart_changes($changes, $files)
 			if $restart_needed;
 	}
 	while(my $pack = shift @{$changes->{upgrade_deps}}) {
-		do_install($pack, $package{$pack}{v_target}, $file->{$pack}, 0);
-		restart_changes($changes, $file)
+		do_install($pack, $package{$pack}{v_target},
+			$files->{$pack}, 0);
+		restart_changes($changes, $files)
 			if $restart_needed;
 	}
 	while(my $pack = shift @{$changes->{upgrades}}) {
 		do_upgrade($pack, $package{$pack}{v_installed},
-			$package{$pack}{v_target}, $file->{$pack});
-		restart_changes($changes, $file)
+			$package{$pack}{v_target}, $files->{$pack});
+		restart_changes($changes, $files)
 			if $restart_needed;
 	}
 	while(my $pack = shift @{$changes->{installs}}) {
-		do_install($pack, $package{$pack}{v_target}, $file->{$pack}, 1);
-		restart_changes($changes, $file)
+		do_install($pack, $package{$pack}{v_target},
+			$files->{$pack}, 1);
+		restart_changes($changes, $files)
 			if $restart_needed;
 	}
 
@@ -990,12 +973,12 @@ sub make_changes2 {
 
 	while(my $pack = shift @{$changes->{remove_rdeps}}) {
 		do_remove($pack);
-		restart_changes($changes, $file)
+		restart_changes($changes, $files)
 			if $restart_needed;
 	}
 	while(my $pack = shift @{$changes->{removes}}) {
 		do_remove($pack);
-		restart_changes($changes, $file)
+		restart_changes($changes, $files)
 			if $restart_needed;
 	}
 
@@ -1003,7 +986,7 @@ sub make_changes2 {
 }
 
 sub restart_changes {
-	my ($changes, $file) = @_;
+	my ($changes, $files) = @_;
 
 	print "\n";
 
@@ -1018,7 +1001,7 @@ sub restart_changes {
 		next
 			unless @{$changes->{$k}};
 		push @exe, "$k:",
-			map join(":", $_, $package{$_}{v_target}, $file->{$_}),
+			map join(":", $_, $package{$_}{v_target}, $files->{$_}),
 				@{$changes->{$k}};
 	}
 
@@ -1037,7 +1020,7 @@ sub do_restart {
 	lock_installed();
 
 	my $k;
-	my ($changes, $file);
+	my ($changes, $files);
 	while(my $a = shift @ARGV) {
 		if ($a =~ m{^(install_deps|upgrade_deps|upgrades|installs
 			|remove_rdeps|removes):$}x) {
@@ -1051,10 +1034,10 @@ sub do_restart {
 		my ($pack, $vers, $f) = split /:/, $a, 3;
 		push @{$changes->{$k}}, $pack;
 		$package{$pack}{v_target} = $vers;
-		$file->{$pack} = $f;
+		$files->{$pack} = $f;
 	}
 
-	make_changes2($changes, $file);
+	make_changes2($changes, $files);
 }
 
 sub do_install {
