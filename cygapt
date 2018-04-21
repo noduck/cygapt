@@ -536,6 +536,7 @@ $command{rdeps} = $command{rdepends};
 $command{dist_upgrade} = $command{upgrade};
 $command{auto_remove} = $command{autoremove};
 $command{my_deps}{sub} = \&my_deps;
+$command{restart}{sub} = \&do_restart;
 
 my %all_opts = %common_opt;
 for my $c (values %command) {
@@ -920,22 +921,32 @@ sub make_changes {
 		return;
 	}
 
-	for my $pack (@{$changes->{install_deps}},
-			@{$changes->{upgrade_deps}}) {
-		do_install($pack, $package{$pack}{v_target}, $file{$pack}, 0);
-		if ($restart_needed) {
-		}
+	make_changes2($changes, \%file);
+}
+
+sub make_changes2 {
+	my ($changes, $file) = @_;
+
+	while(my $pack = shift @{$changes->{install_deps}}) {
+		do_install($pack, $package{$pack}{v_target}, $file->{$pack}, 0);
+		restart_changes($changes, $file)
+			if $restart_needed;
 	}
-	for my $pack (@{$changes->{upgrades}}) {
+	while(my $pack = shift @{$changes->{upgrade_deps}}) {
+		do_install($pack, $package{$pack}{v_target}, $file->{$pack}, 0);
+		restart_changes($changes, $file)
+			if $restart_needed;
+	}
+	while(my $pack = shift @{$changes->{upgrades}}) {
 		do_upgrade($pack, $package{$pack}{v_installed},
-			$package{$pack}{v_target}, $file{$pack});
-		if ($restart_needed) {
-		}
+			$package{$pack}{v_target}, $file->{$pack});
+		restart_changes($changes, $file)
+			if $restart_needed;
 	}
-	for my $pack (@{$changes->{installs}}) {
-		do_install($pack, $package{$pack}{v_target}, $file{$pack}, 1);
-		if ($restart_needed) {
-		}
+	while(my $pack = shift @{$changes->{installs}}) {
+		do_install($pack, $package{$pack}{v_target}, $file->{$pack}, 1);
+		restart_changes($changes, $file)
+			if $restart_needed;
 	}
 
 	# run all postinstall
@@ -977,12 +988,73 @@ sub make_changes {
 			if $rc;
 	}
 
-	for my $pack (@{$changes->{remove_rdeps}},
-			@{$changes->{removes}}) {
+	while(my $pack = shift @{$changes->{remove_rdeps}}) {
 		do_remove($pack);
+		restart_changes($changes, $file)
+			if $restart_needed;
+	}
+	while(my $pack = shift @{$changes->{removes}}) {
+		do_remove($pack);
+		restart_changes($changes, $file)
+			if $restart_needed;
 	}
 
 	unlock_installed();
+}
+
+sub restart_changes {
+	my ($changes, $file) = @_;
+
+	print "\n";
+
+	my @exe = ($0, 'restart');
+	push @exe, "-D$debug"
+		if $debug;
+	push @exe, "-v"
+		if $verbose;
+
+	for my $k (qw(install_deps upgrade_deps upgrades installs remove_rdeps
+		removes)) {
+		next
+			unless @{$changes->{$k}};
+		push @exe, "$k:",
+			map join(":", $_, $package{$_}{v_target}, $file->{$_}),
+				@{$changes->{$k}};
+	}
+
+	print "Restart: @exe\n"
+		if $debug;
+	{ exec @exe };
+	print STDERR "E: Could not restart: $!\n";
+	exit 10;
+}
+
+sub do_restart {
+	print "RESTART: @ARGV\n"
+		if $debug;
+
+	get_installed();
+	lock_installed();
+
+	my $k;
+	my ($changes, $file);
+	while(my $a = shift @ARGV) {
+		if ($a =~ m{^(install_deps|upgrade_deps|upgrades|installs
+			|remove_rdeps|removes):$}x) {
+			$k = $1;
+			next;
+		} elsif (! $k || $a !~ /:.*:/) {
+			print STDERR "E: unexpected arguments: @ARGV\n";
+			exit 10;
+		}
+
+		my ($pack, $vers, $f) = split /:/, $a, 3;
+		push @{$changes->{$k}}, $pack;
+		$package{$pack}{v_target} = $vers;
+		$file->{$pack} = $f;
+	}
+
+	make_changes2($changes, $file);
 }
 
 sub do_install {
@@ -1121,7 +1193,7 @@ sub do_extract {
 			if $sub;
 		chomp;
 		if (exists $my_dlls->{"/$_"}) {
-			print STDERR "W: overwriting one of my DLLs: $_\n";
+			print STDERR "W: overwriting in use DLL: /$_\n";
 			# next fork might fail
 			$restart_needed = 1;
 		}
