@@ -755,6 +755,8 @@ sub make_changes {
 	my $rc = @{$changes->{removes}}
 		+ @{$changes->{remove_rdeps}};
 
+	safeguard_dlls();
+
 	my @base = grep { ($package{$_}{tag_category} // '')
 			=~ /(?:^|\s)Base(?:\s|$)/ }
 		@{$changes->{removes}}, @{$changes->{remove_rdeps}};
@@ -1222,6 +1224,14 @@ sub do_remove {
 	delete $p->{v_installed};
 	delete $p->{picked};
 	write_installed();
+}
+
+sub safeguard_dlls {
+	state $dlls;
+
+	unless ($dlls) {
+		$dlls = my_dlls();
+	}
 }
 
 sub clean {
