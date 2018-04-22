@@ -755,8 +755,6 @@ sub make_changes {
 	my $rc = @{$changes->{removes}}
 		+ @{$changes->{remove_rdeps}};
 
-	safeguard_dlls();
-
 	my @base = grep { ($package{$_}{tag_category} // '')
 			=~ /(?:^|\s)Base(?:\s|$)/ }
 		@{$changes->{removes}}, @{$changes->{remove_rdeps}};
@@ -909,6 +907,8 @@ sub make_changes {
 sub make_changes2 {
 	my ($changes, $files) = @_;
 
+	safeguard_dlls();
+
 	while(my $pack = shift @{$changes->{install_deps}}) {
 		do_install($pack, $package{$pack}{v_target},
 			$files->{$pack}, 0);
@@ -933,6 +933,8 @@ sub make_changes2 {
 		restart_changes($changes, $files)
 			if $restart_needed;
 	}
+
+	safeguard_dlls();
 
 	# run all postinstall
 	for my $post (glob("$root/etc/postinstall/*.sh")) {
@@ -1151,7 +1153,7 @@ sub do_extract {
 			sub { die "Alarm"; },
 			0, POSIX::SA_SIGINFO));
 		eval {
-			alarm(2);
+			#alarm(2);
 			unless (open $tar_fh, '-|', @exec) {
 				print STDERR "E: Cannot start tar $tar: $!\n";
 				exit 10;
@@ -1176,13 +1178,8 @@ sub do_extract {
 		chomp;
 		$sub->($_)
 			if $sub;
-		chomp;
-		if (exists $my_dlls->{"/$_"}) {
-			print STDERR "W: overwriting in use DLL: /$_\n";
-			# next fork might fail
-			$restart_needed = 1;
-		}
 	}
+	safeguard_dlls('update');
 
 	close($tar_fh);
 }
@@ -1229,9 +1226,65 @@ sub do_remove {
 sub safeguard_dlls {
 	state $dlls;
 
-	unless ($dlls) {
+$debug++;
+	if (! $dlls) {
+		# initialize
 		$dlls = my_dlls();
+		for my $dll (keys %$dlls) {
+			if ($dll =~ m{^/cygdrive/c/}) {
+				delete $dlls->{$dll};
+				next;
+			}
+			print STDERR "Keeping safeguard of $dll\n"
+				if $debug;
+			$dlls->{$dll} = {
+				dll => $dll,
+				safeguard => "$dll.cygapt_safeguard",
+			};
+			unlink($dlls->{$dll}{safeguard});
+			link($dll, $dlls->{$dll}{safeguard});
+system("ls -l $dll*");
+		}
+	} elsif (! @_) {
+
+print "\n\ncleanup safeguards\n";
+		for my $dll (keys %$dlls) {
+			if ($dlls->{$dll}{safeguard}) {
+				print STDERR "Deleting safeguard of $dll\n"
+					if $debug;
+				unlink($dlls->{$dll}{safeguard});
+			}
+			if ($dlls->{$dll}{new}) {
+				print STDERR "Installing new $dll\n"
+					if $debug;
+				rename($dlls->{$dll}{new}, $dll);
+# TODO: restart for postinstall
+			#$restart_needed = 1;
+			}
+system("ls -l $dll*");
+		}
+	} else {
+		for my $dll (keys %$dlls) {
+			# dll is no longer linked to safeguard, or gone
+# TODO: safeguard and dll should have same inode
+			my $nlink = (stat $dll)[3];
+			next
+				if $nlink && $nlink > 1;
+# TODO; what if it is a delete?
+			$dlls->{$dll}{new} = "$dll.cygapt_new";
+			print STDERR "Replacing new version with safeguard ",
+				"of $dll\n"
+				if $debug;
+			print "\trename($dll, $dlls->{$dll}{new})\n";
+			rename($dll, $dlls->{$dll}{new});
+			print "\tlink($dlls->{$dll}{safeguard}, $dll);\n";
+			link($dlls->{$dll}{safeguard}, $dll);
+			for my $g (glob "$dll*") {
+print "\t", (stat $g)[3], ": $g\n";
+			}
+		}
 	}
+$debug--;
 }
 
 sub clean {
@@ -1983,6 +2036,7 @@ sub my_dlls {
 
 	my $ldd = `ldd /usr/bin/perl`;
 	map $dlls->{$_} = $_, ($ldd =~ m{=> (/.*?\.dll)}gmis);
+	$dlls->{'/usr/bin/perl.exe'} = '/usr/bin/perl.exe';
 
 	return $dlls;
 }
