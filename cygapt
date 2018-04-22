@@ -912,31 +912,26 @@ sub make_changes2 {
 	while(my $pack = shift @{$changes->{install_deps}}) {
 		do_install($pack, $package{$pack}{v_target},
 			$files->{$pack}, 0);
-		restart_changes($changes, $files)
-			if $restart_needed;
 	}
 	while(my $pack = shift @{$changes->{upgrade_deps}}) {
 		do_install($pack, $package{$pack}{v_target},
 			$files->{$pack}, 0);
-		restart_changes($changes, $files)
-			if $restart_needed;
 	}
 	while(my $pack = shift @{$changes->{upgrades}}) {
 		do_upgrade($pack, $package{$pack}{v_installed},
 			$package{$pack}{v_target}, $files->{$pack});
-		restart_changes($changes, $files)
-			if $restart_needed;
 	}
 	while(my $pack = shift @{$changes->{installs}}) {
 		do_install($pack, $package{$pack}{v_target},
 			$files->{$pack}, 1);
-		restart_changes($changes, $files)
-			if $restart_needed;
 	}
 
 	safeguard_dlls();
+	restart_changes($changes, $files)
+			if $restart_needed;
 
 	# run all postinstall
+# TODO: run them by order of depends?
 	for my $post (glob("$root/etc/postinstall/*.sh")) {
 		(my $pack = $post) =~ s{^.*/}{};
 		$pack =~ s{\.sh$}{}i;
@@ -977,13 +972,9 @@ sub make_changes2 {
 
 	while(my $pack = shift @{$changes->{remove_rdeps}}) {
 		do_remove($pack);
-		restart_changes($changes, $files)
-			if $restart_needed;
 	}
 	while(my $pack = shift @{$changes->{removes}}) {
 		do_remove($pack);
-		restart_changes($changes, $files)
-			if $restart_needed;
 	}
 
 	unlock_installed();
@@ -1120,6 +1111,8 @@ sub do_upgrade {
 			unlink "$root/$file";
 			unlink "$root/$file.done";
 		} elsif ($file =~ m{/$}) {
+# TODO: if rmdir fails, that may be because of a safeguard, should
+# try again after cleanup of safeguards
 			rmdir "$root/$file";
 		} else {
 			unlink "$root/$file";
@@ -1226,7 +1219,6 @@ sub do_remove {
 sub safeguard_dlls {
 	state $dlls;
 
-$debug++;
 	if (! $dlls) {
 		# initialize
 		$dlls = my_dlls();
@@ -1239,15 +1231,13 @@ $debug++;
 				if $debug;
 			$dlls->{$dll} = {
 				dll => $dll,
+				inode => (stat $dll)[1],
 				safeguard => "$dll.cygapt_safeguard",
 			};
 			unlink($dlls->{$dll}{safeguard});
 			link($dll, $dlls->{$dll}{safeguard});
-system("ls -l $dll*");
 		}
 	} elsif (! @_) {
-
-print "\n\ncleanup safeguards\n";
 		for my $dll (keys %$dlls) {
 			if ($dlls->{$dll}{safeguard}) {
 				print STDERR "Deleting safeguard of $dll\n"
@@ -1258,33 +1248,36 @@ print "\n\ncleanup safeguards\n";
 				print STDERR "Installing new $dll\n"
 					if $debug;
 				rename($dlls->{$dll}{new}, $dll);
-# TODO: restart for postinstall
-			#$restart_needed = 1;
+				$restart_needed = 1;
 			}
-system("ls -l $dll*");
+			if ($dlls->{$dll}{delete}) {
+				print STDERR "Deleting removed $dll\n"
+					if $debug;
+				unlink($dlls->{$dll}{delete});
+			}
 		}
-	} else {
+	} elsif ($_[0] eq 'update') {
 		for my $dll (keys %$dlls) {
 			# dll is no longer linked to safeguard, or gone
-# TODO: safeguard and dll should have same inode
-			my $nlink = (stat $dll)[3];
+			my $inode = (stat $dll)[1];
 			next
-				if $nlink && $nlink > 1;
-# TODO; what if it is a delete?
-			$dlls->{$dll}{new} = "$dll.cygapt_new";
-			print STDERR "Replacing new version with safeguard ",
-				"of $dll\n"
-				if $debug;
-			print "\trename($dll, $dlls->{$dll}{new})\n";
-			rename($dll, $dlls->{$dll}{new});
-			print "\tlink($dlls->{$dll}{safeguard}, $dll);\n";
-			link($dlls->{$dll}{safeguard}, $dll);
-			for my $g (glob "$dll*") {
-print "\t", (stat $g)[3], ": $g\n";
+				if defined $inode
+				&& $inode == $dlls->{$dll}{inode};
+			if (! defined $inode) {
+				$dlls->{$dll}{delete} = $dll;
+				print STDERR "Restoring deleted version with ",
+					"safeguard of $dll\n"
+					if $debug;
+			} else {
+				$dlls->{$dll}{new} = "$dll.cygapt_new";
+				print STDERR "Replacing new version with ",
+					"safeguard of $dll\n"
+					if $debug;
+				rename($dll, $dlls->{$dll}{new});
 			}
+			link($dlls->{$dll}{safeguard}, $dll);
 		}
 	}
-$debug--;
 }
 
 sub clean {
