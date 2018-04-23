@@ -63,11 +63,22 @@ mirror="${mirror#"${mirror%%[![:space:]]*}"}"
 arch=$(uname -m)
 arch="${arch/i6/x}"
 
+spin="-"
+
 get $mirror$arch/setup.bz2 | bzcat | while read line; do
 	case "$line" in
 	@*)
 		pack="${line##@ }"
 		release="cur"
+
+		echo -en "\r$spin"
+		case "$spin" in
+		-) spin="\\" ;;
+		\\) spin="|" ;;
+		\|) spin="/" ;;
+		*) spin="-" ;;
+		esac
+
 		continue
 		;;
 	\[*\])
@@ -78,14 +89,16 @@ get $mirror$arch/setup.bz2 | bzcat | while read line; do
 	install*)
 		test "$release" = "cur" || continue
 		case "$pack" in
+		libcrypt0) ;;
+		libssp0) ;;
 		perl) ;;
 		perl_base) ;;
 		perl_autorebase) ;;
+		perl-Compress-Bzip2) ;;
 		perl-Digest-SHA) ;;
 		perl-Scalar-List-Utils) ;;
 		perl-TermReadKey) ;;
 		perl-libwww-perl) ;;
-		# TODO: libwww-perl depends
 		perl-Encode-Locale) ;;
 		perl-File-Listing) ;;
 		perl-HTTP-Date) ;;
@@ -116,7 +129,7 @@ get $mirror$arch/setup.bz2 | bzcat | while read line; do
 		continue
 	fi
 
-	echo "Get $mirror$path"
+	echo -en "\r"
 	get $mirror$path | tar -J -xf - -C /
 done
 
