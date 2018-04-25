@@ -1484,7 +1484,7 @@ sub upgradable {
 					print "Done\n";
 					$quiet = 1;
 				}
-				if ($opt->{install}) {
+				if ($opt->{install} || $p->{v_installed}) {
 					print "Note, selecting '$pack' for ",
 						"glob '$_[$a]'\n";
 				} else {
