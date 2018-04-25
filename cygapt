@@ -197,7 +197,7 @@ HELP
 			build_tree();
 			get_installed();
 
-			my $changes = upgradable(@ARGV);
+			my $changes = upgradable({ install => 0 }, @ARGV);
 			make_changes($changes)
 				if $changes;
 		},
@@ -239,7 +239,7 @@ HELP
 			build_tree();
 			get_installed();
 
-			my $changes = upgradable(@ARGV);
+			my $changes = upgradable({ install => 1 }, @ARGV);
 			make_changes($changes)
 				if $changes;
 		},
@@ -1459,9 +1459,10 @@ sub _build_tree {
 }
 
 sub upgradable {
-	my $quiet;
-	$quiet = ${shift @_}
-		if @_ && ref $_[0] eq 'SCALAR';
+	my $opt;
+	$opt = shift @_
+		if @_ && ref $_[0] eq 'HASH';
+	my $quiet = $opt->{quiet};
 	$| = 1;
 	print "Calculating upgrade... "
 		unless $quiet;
@@ -1483,8 +1484,14 @@ sub upgradable {
 					print "Done\n";
 					$quiet = 1;
 				}
-				print "Note, selecting '$pack' for ",
-					"glob '$_[$a]'\n";
+				if ($opt->{install}) {
+					print "Note, selecting '$pack' for ",
+						"glob '$_[$a]'\n";
+				} else {
+					# ignore uninstalled package during
+					# upgrade
+					next;
+				}
 			}
 		} elsif (! $p->{v_installed}) {
 			next;
