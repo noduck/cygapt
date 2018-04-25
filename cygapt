@@ -1259,6 +1259,9 @@ sub safeguard_dlls {
 	} elsif ($_[0] eq 'update') {
 		for my $dll (keys %$dlls) {
 			# dll is no longer linked to safeguard, or gone
+# TODO: doesn't find DLLs that are removed?
+# e.g. perl 5.26 => 5.22 should find deleted DLLs under 
+# usr/lib/perl5/5.26/x86_64-cygwin-threads/auto
 			my $inode = (stat $dll)[1];
 			next
 				if defined $inode
