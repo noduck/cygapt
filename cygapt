@@ -197,6 +197,10 @@ HELP
 			build_tree();
 			get_installed();
 
+			print "W: downgrades may result in non-functional ",
+				"installation!\n"
+				if $downgrades;
+
 			my $changes = upgradable({ install => 0 }, @ARGV);
 			make_changes($changes)
 				if $changes;
@@ -238,6 +242,10 @@ HELP
 			get_available();
 			build_tree();
 			get_installed();
+
+			print "W: downgrades may result in non-functional ",
+				"installation!\n"
+				if $downgrades;
 
 			my $changes = upgradable({ install => 1 }, @ARGV);
 			make_changes($changes)
@@ -1059,6 +1067,8 @@ sub do_install {
 	do_extract($tar, $lst_fh);
 	$lst_fh->gzclose;
 
+	safeguard_dlls('update');
+
 	my $p = $package{$pack};
 	$p->{v_installed} = $vers;
 	$p->{versions}{$p->{v_installed}}{installed} = 1;
@@ -1110,14 +1120,16 @@ sub do_upgrade {
 		if ($file =~ m{^etc/postinstall/.*\.sh$}) {
 			unlink "$root/$file";
 			unlink "$root/$file.done";
-		} elsif ($file =~ m{/$}) {
-# TODO: if rmdir fails, that may be because of a safeguard, should
-# try again after cleanup of safeguards
-			rmdir "$root/$file";
-		} else {
+		} elsif ($file !~ m{/$}) {
 			unlink "$root/$file";
+		} else {
+			rmdir "$root/$file"
+				|| safeguard_dlls(delay_dir => "$root/$file");
 		}
 	}
+
+	# safeguard update only after deleting old version's remaining files
+	safeguard_dlls('update');
 
 	my $p = $package{$pack};
 	$p->{v_installed} = $new_vers;
@@ -1172,7 +1184,6 @@ sub do_extract {
 		$sub->($_)
 			if $sub;
 	}
-	safeguard_dlls('update');
 
 	close($tar_fh);
 }
@@ -1218,6 +1229,7 @@ sub do_remove {
 
 sub safeguard_dlls {
 	state $dlls;
+	state $dirs = [];
 
 	if (! $dlls) {
 		# initialize
@@ -1256,12 +1268,10 @@ sub safeguard_dlls {
 				unlink($dlls->{$dll}{delete});
 			}
 		}
+		map rmdir $_, @$dirs;
 	} elsif ($_[0] eq 'update') {
 		for my $dll (keys %$dlls) {
 			# dll is no longer linked to safeguard, or gone
-# TODO: doesn't find DLLs that are removed?
-# e.g. perl 5.26 => 5.22 should find deleted DLLs under 
-# usr/lib/perl5/5.26/x86_64-cygwin-threads/auto
 			my $inode = (stat $dll)[1];
 			next
 				if defined $inode
@@ -1280,6 +1290,8 @@ sub safeguard_dlls {
 			}
 			link($dlls->{$dll}{safeguard}, $dll);
 		}
+	} elsif ($_[0] eq 'delay_dir') {
+		push @$dirs, @_;
 	}
 }
 
