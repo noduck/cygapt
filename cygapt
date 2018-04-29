@@ -756,6 +756,20 @@ sub make_changes {
 	$changes->{removes} //= [];
 	$changes->{remove_rdeps} //= [];
 
+	# extract the downgrades from the upgrades
+	my $dc = 0;
+	$changes->{downgrades} = [];
+	for(my $i = 0; $i < @{$changes->{upgrades}}; ) {
+		my $pack = $changes->{upgrades}[$i];
+		my $p = $package{$pack};
+		$i++, next
+			if $p->{versions}{$p->{v_target}}{version_idx}
+			<= $p->{versions}{$p->{v_installed}}{version_idx};
+		push @{$changes->{downgrades}}, $pack;
+		splice @{$changes->{upgrades}}, $i, 1;
+		$dc++;
+	}
+
 	my $nc = @{$changes->{installs}}
 		+ @{$changes->{install_deps}}
 		+ @{$changes->{upgrade_deps}};
@@ -805,10 +819,16 @@ sub make_changes {
 		$ask = 1
 			if @{$changes->{upgrade_deps}};
 	}
-	# upgrades
+	# downgrades
 	if ($uc) {
 		print "The following packages will be upgraded:\n";
 		print_array(sort @{$changes->{upgrades}});
+		$ask = 1;
+	}
+	# upgrades
+	if ($dc) {
+		print "The following packages will be DOWNGRADED:\n";
+		print_array(sort @{$changes->{downgrades}});
 		$ask = 1;
 	}
 	# removes (explicit remove, and rdepends)
@@ -819,10 +839,11 @@ sub make_changes {
 		$ask = 1;
 	}
 
-	print "$uc upgraded, $nc newly installed, $rc to remove and ",
-		"$nuc not upgraded.\n";
+	print "$uc upgraded, $nc newly installed, ",
+		($dc ? "$dc downgraded, " : ""),
+		"$rc to remove and $nuc not upgraded.\n";
 	return
-		unless $uc || $nc || $rc;
+		unless $uc || $dc || $nc || $rc;
 
 	my @get;
 	my $files;
@@ -830,7 +851,8 @@ sub make_changes {
 	for my $pack (sort @{$changes->{installs}},
 			@{$changes->{install_deps}},
 			@{$changes->{upgrade_deps}},
-			@{$changes->{upgrades}}) {
+			@{$changes->{upgrades}},
+			@{$changes->{downgrades}}) {
 		my $p = $package{$pack};
 		unless ($p->{v_target}) {
 			print STDERR "E: no target version was ",
@@ -926,6 +948,10 @@ sub make_changes2 {
 			$files->{$pack}, 0);
 	}
 	while(my $pack = shift @{$changes->{upgrades}}) {
+		do_upgrade($pack, $package{$pack}{v_installed},
+			$package{$pack}{v_target}, $files->{$pack});
+	}
+	while(my $pack = shift @{$changes->{downgrades}}) {
 		do_upgrade($pack, $package{$pack}{v_installed},
 			$package{$pack}{v_target}, $files->{$pack});
 	}
@@ -1243,7 +1269,8 @@ sub safeguard_dlls {
 				if $debug;
 			$dlls->{$dll} = {
 				dll => $dll,
-				inode => (stat $dll)[1],
+				# second elemtn of empty list is nothing!
+				inode => (stat $dll)[1] // undef,
 				safeguard => "$dll.cygapt_safeguard",
 			};
 			unlink($dlls->{$dll}{safeguard});
