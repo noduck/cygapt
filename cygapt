@@ -1509,7 +1509,7 @@ sub upgradable {
 		unless $quiet;
 
 	my @arg_found;
-	my ($re, $t_rels, $t_vers) = argv2pack_re(@_);
+	my ($re, $t_rels, $t_vers, $arg_packs) = argv2pack_re(@_);
 
 	my (%install, @reinstall, @upgrade);
 	for my $pack (keys %package) {
@@ -1520,14 +1520,14 @@ sub upgradable {
 			next
 				if $pack !~ $re;
 			$arg_found[$a]++;
-			if ($pack ne $_[$a]) {
+			if ($pack ne $arg_packs->[$a]) {
 				unless ($quiet) {
 					print "Done\n";
 					$quiet = 1;
 				}
 				if ($opt->{install} || $p->{v_installed}) {
 					print "Note, selecting '$pack' for ",
-						"glob '$_[$a]'\n";
+						"glob '$arg_packs->[$a]'\n";
 				} else {
 					# ignore uninstalled package during
 					# upgrade
@@ -1654,15 +1654,15 @@ sub list_depends {
 	$opt->{uninstalled_level} //= { };
 
 	my @arg_found;
-	my ($re, $t_rels, $t_vers) = argv2pack_re(@_);
+	my ($re, $t_rels, $t_vers, $arg_packs) = argv2pack_re(@_);
 
 	for my $pack (sort keys %package) {
 		$a = undef;
 		next
 			if $re && $pack !~ $re;
 		$arg_found[$a]++;
-		print "Note, selecting '$pack' for glob '$_[$a]'\n"
-			if $pack ne $_[$a];
+		print "Note, selecting '$pack' for glob '$arg_packs->[$a]'\n"
+			if $pack ne $arg_packs->[$a];
 		my $p = $package{$pack};
 
 		$opt->{t_rel} = $t_rels->[$a];
@@ -2812,11 +2812,11 @@ sub argv2re {
 }
 
 sub argv2pack_re {
-	return (undef, [], [])
+	return (undef, [], [], [])
 		unless @_;
 
 	my $opt = @_ && ref $_[0] eq 'HASH' ? shift @_ : { };
-	my (@re, @t_rel, @t_ver);
+	my (@re, @t_rel, @t_ver, @pack);
 	for my $a (@_) {
 		# don't clobber contents of original array
 		local $_ = $a;
@@ -2831,6 +2831,7 @@ sub argv2pack_re {
 
  		push @t_rel, s{/(\S+)$}{} ? glob2re("^$1\$") : $target_release;
 		push @t_ver, s{=(\S+)$}{} ? glob2re("^$1\$") : undef;
+		push @pack, $_;
 
 		push @re, glob2re("^$_\$")."(?{ \$a = ".scalar(@re)." })";
 	}
@@ -2842,7 +2843,7 @@ sub argv2pack_re {
 	print STDERR "Match: $re\n"
 		if $debug;
 
-	return ($re, \@t_rel, \@t_ver);
+	return ($re, \@t_rel, \@t_ver, \@pack);
 }
 
 sub glob2re {
