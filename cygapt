@@ -964,9 +964,8 @@ sub make_changes2 {
 	restart_changes($changes, $files)
 			if $restart_needed;
 
-	# run all postinstall
-# TODO: run them by order of depends?
-	for my $post (glob("$root/etc/postinstall/*.sh")) {
+	# run all postinstall, alphabetical order
+	for my $post (sort glob("$root/etc/postinstall/*.sh")) {
 		(my $pack = $post) =~ s{^.*/}{};
 		$pack =~ s{\.sh$}{}i;
 		my $vers;
@@ -985,7 +984,7 @@ sub make_changes2 {
 			if $debug;
 
 		$post =~ s{^$root}{};
-		my $rc = system($root ? ('chroot', "$root/") : (), $post);
+		my $rc = 1; #system($root ? ('chroot', "$root/") : (), $post);
 		rename($root.$post, "$root$post.done")
 			unless $rc;
 	}
@@ -1890,8 +1889,11 @@ sub find {
 	state %file2pack;
 
 	# if not a glob, and we already parsed all lst, keep it simple
-	return $file2pack{$_[0]}
-		if keys %file2pack && @_ == 1 && $_[0] !~ /[*?{}]/;
+	if (keys %file2pack && @_ == 1 && $_[0] !~ /[*?{}]/) {
+		# drop first slash
+		(my $a = $_[0]) =~ s{^/}{};
+		return exists $file2pack{$a} ? $file2pack{$a} : undef;
+	}
 
 	my @arg_found;
 	my $re = argv2re(map {
@@ -1900,7 +1902,8 @@ sub find {
 		$a = "*$a"
 			unless $a =~ s{^/+}{};
 		$a;
-	} @_);
+	# ignore $root at the start of file
+	} map { (my $a = $_) =~ s/^$root//; $a } @_);
 
 	if (keys %file2pack) {
 		for my $file (keys %file2pack) {
@@ -1921,6 +1924,7 @@ sub find {
 			my $line;
 			my $cnt = 0;
 			while($lst_fh->gzreadline($line)) {
+				chomp($line);
 				$file2pack{$line} = $pack;
 
 				if ($line =~ $re) {
@@ -1932,7 +1936,7 @@ sub find {
 					$arg_found[$a]++;
 					print "$pack:\n"
 						unless $cnt;
-					print "\t/$line";
+					print "\t/$line\n";
 					$cnt++;
 				}
 			}
