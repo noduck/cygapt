@@ -197,6 +197,10 @@ HELP
 			build_tree();
 			get_installed();
 
+			print "W: downgrades may result in non-functional ",
+				"installation!\n"
+				if $downgrades;
+
 			my $changes = upgradable({ install => 0 }, @ARGV);
 			make_changes($changes)
 				if $changes;
@@ -238,6 +242,10 @@ HELP
 			get_available();
 			build_tree();
 			get_installed();
+
+			print "W: downgrades may result in non-functional ",
+				"installation!\n"
+				if $downgrades;
 
 			my $changes = upgradable({ install => 1 }, @ARGV);
 			make_changes($changes)
@@ -748,6 +756,20 @@ sub make_changes {
 	$changes->{removes} //= [];
 	$changes->{remove_rdeps} //= [];
 
+	# extract the downgrades from the upgrades
+	my $dc = 0;
+	$changes->{downgrades} = [];
+	for(my $i = 0; $i < @{$changes->{upgrades}}; ) {
+		my $pack = $changes->{upgrades}[$i];
+		my $p = $package{$pack};
+		$i++, next
+			if $p->{versions}{$p->{v_target}}{version_idx}
+			<= $p->{versions}{$p->{v_installed}}{version_idx};
+		push @{$changes->{downgrades}}, $pack;
+		splice @{$changes->{upgrades}}, $i, 1;
+		$dc++;
+	}
+
 	my $nc = @{$changes->{installs}}
 		+ @{$changes->{install_deps}}
 		+ @{$changes->{upgrade_deps}};
@@ -797,10 +819,16 @@ sub make_changes {
 		$ask = 1
 			if @{$changes->{upgrade_deps}};
 	}
-	# upgrades
+	# downgrades
 	if ($uc) {
 		print "The following packages will be upgraded:\n";
 		print_array(sort @{$changes->{upgrades}});
+		$ask = 1;
+	}
+	# upgrades
+	if ($dc) {
+		print "The following packages will be DOWNGRADED:\n";
+		print_array(sort @{$changes->{downgrades}});
 		$ask = 1;
 	}
 	# removes (explicit remove, and rdepends)
@@ -811,10 +839,11 @@ sub make_changes {
 		$ask = 1;
 	}
 
-	print "$uc upgraded, $nc newly installed, $rc to remove and ",
-		"$nuc not upgraded.\n";
+	print "$uc upgraded, $nc newly installed, ",
+		($dc ? "$dc downgraded, " : ""),
+		"$rc to remove and $nuc not upgraded.\n";
 	return
-		unless $uc || $nc || $rc;
+		unless $uc || $dc || $nc || $rc;
 
 	my @get;
 	my $files;
@@ -822,7 +851,8 @@ sub make_changes {
 	for my $pack (sort @{$changes->{installs}},
 			@{$changes->{install_deps}},
 			@{$changes->{upgrade_deps}},
-			@{$changes->{upgrades}}) {
+			@{$changes->{upgrades}},
+			@{$changes->{downgrades}}) {
 		my $p = $package{$pack};
 		unless ($p->{v_target}) {
 			print STDERR "E: no target version was ",
@@ -921,6 +951,10 @@ sub make_changes2 {
 		do_upgrade($pack, $package{$pack}{v_installed},
 			$package{$pack}{v_target}, $files->{$pack});
 	}
+	while(my $pack = shift @{$changes->{downgrades}}) {
+		do_upgrade($pack, $package{$pack}{v_installed},
+			$package{$pack}{v_target}, $files->{$pack});
+	}
 	while(my $pack = shift @{$changes->{installs}}) {
 		do_install($pack, $package{$pack}{v_target},
 			$files->{$pack}, 1);
@@ -930,9 +964,8 @@ sub make_changes2 {
 	restart_changes($changes, $files)
 			if $restart_needed;
 
-	# run all postinstall
-# TODO: run them by order of depends?
-	for my $post (glob("$root/etc/postinstall/*.sh")) {
+	# run all postinstall, alphabetical order
+	for my $post (sort glob("$root/etc/postinstall/*.sh")) {
 		(my $pack = $post) =~ s{^.*/}{};
 		$pack =~ s{\.sh$}{}i;
 		my $vers;
@@ -951,7 +984,7 @@ sub make_changes2 {
 			if $debug;
 
 		$post =~ s{^$root}{};
-		my $rc = system($root ? ('chroot', "$root/") : (), $post);
+		my $rc = 1; #system($root ? ('chroot', "$root/") : (), $post);
 		rename($root.$post, "$root$post.done")
 			unless $rc;
 	}
@@ -1059,6 +1092,8 @@ sub do_install {
 	do_extract($tar, $lst_fh);
 	$lst_fh->gzclose;
 
+	safeguard_dlls('update');
+
 	my $p = $package{$pack};
 	$p->{v_installed} = $vers;
 	$p->{versions}{$p->{v_installed}}{installed} = 1;
@@ -1110,14 +1145,16 @@ sub do_upgrade {
 		if ($file =~ m{^etc/postinstall/.*\.sh$}) {
 			unlink "$root/$file";
 			unlink "$root/$file.done";
-		} elsif ($file =~ m{/$}) {
-# TODO: if rmdir fails, that may be because of a safeguard, should
-# try again after cleanup of safeguards
-			rmdir "$root/$file";
-		} else {
+		} elsif ($file !~ m{/$}) {
 			unlink "$root/$file";
+		} else {
+			rmdir "$root/$file"
+				|| safeguard_dlls(delay_dir => "$root/$file");
 		}
 	}
+
+	# safeguard update only after deleting old version's remaining files
+	safeguard_dlls('update');
 
 	my $p = $package{$pack};
 	$p->{v_installed} = $new_vers;
@@ -1172,7 +1209,6 @@ sub do_extract {
 		$sub->($_)
 			if $sub;
 	}
-	safeguard_dlls('update');
 
 	close($tar_fh);
 }
@@ -1218,6 +1254,7 @@ sub do_remove {
 
 sub safeguard_dlls {
 	state $dlls;
+	state $dirs = [];
 
 	if (! $dlls) {
 		# initialize
@@ -1231,7 +1268,8 @@ sub safeguard_dlls {
 				if $debug;
 			$dlls->{$dll} = {
 				dll => $dll,
-				inode => (stat $dll)[1],
+				# second elemtn of empty list is nothing!
+				inode => (stat $dll)[1] // undef,
 				safeguard => "$dll.cygapt_safeguard",
 			};
 			unlink($dlls->{$dll}{safeguard});
@@ -1256,12 +1294,10 @@ sub safeguard_dlls {
 				unlink($dlls->{$dll}{delete});
 			}
 		}
+		map rmdir $_, @$dirs;
 	} elsif ($_[0] eq 'update') {
 		for my $dll (keys %$dlls) {
 			# dll is no longer linked to safeguard, or gone
-# TODO: doesn't find DLLs that are removed?
-# e.g. perl 5.26 => 5.22 should find deleted DLLs under 
-# usr/lib/perl5/5.26/x86_64-cygwin-threads/auto
 			my $inode = (stat $dll)[1];
 			next
 				if defined $inode
@@ -1280,6 +1316,8 @@ sub safeguard_dlls {
 			}
 			link($dlls->{$dll}{safeguard}, $dll);
 		}
+	} elsif ($_[0] eq 'delay_dir') {
+		push @$dirs, @_;
 	}
 }
 
@@ -1471,7 +1509,7 @@ sub upgradable {
 		unless $quiet;
 
 	my @arg_found;
-	my ($re, $t_rels, $t_vers) = argv2pack_re(@_);
+	my ($re, $t_rels, $t_vers, $arg_packs) = argv2pack_re(@_);
 
 	my (%install, @reinstall, @upgrade);
 	for my $pack (keys %package) {
@@ -1482,14 +1520,14 @@ sub upgradable {
 			next
 				if $pack !~ $re;
 			$arg_found[$a]++;
-			if ($pack ne $_[$a]) {
+			if ($pack ne $arg_packs->[$a]) {
 				unless ($quiet) {
 					print "Done\n";
 					$quiet = 1;
 				}
 				if ($opt->{install} || $p->{v_installed}) {
 					print "Note, selecting '$pack' for ",
-						"glob '$_[$a]'\n";
+						"glob '$arg_packs->[$a]'\n";
 				} else {
 					# ignore uninstalled package during
 					# upgrade
@@ -1616,15 +1654,15 @@ sub list_depends {
 	$opt->{uninstalled_level} //= { };
 
 	my @arg_found;
-	my ($re, $t_rels, $t_vers) = argv2pack_re(@_);
+	my ($re, $t_rels, $t_vers, $arg_packs) = argv2pack_re(@_);
 
 	for my $pack (sort keys %package) {
 		$a = undef;
 		next
 			if $re && $pack !~ $re;
 		$arg_found[$a]++;
-		print "Note, selecting '$pack' for glob '$_[$a]'\n"
-			if $pack ne $_[$a];
+		print "Note, selecting '$pack' for glob '$arg_packs->[$a]'\n"
+			if $pack ne $arg_packs->[$a];
 		my $p = $package{$pack};
 
 		$opt->{t_rel} = $t_rels->[$a];
@@ -1851,8 +1889,11 @@ sub find {
 	state %file2pack;
 
 	# if not a glob, and we already parsed all lst, keep it simple
-	return $file2pack{$_[0]}
-		if keys %file2pack && @_ == 1 && $_[0] !~ /[*?{}]/;
+	if (keys %file2pack && @_ == 1 && $_[0] !~ /[*?{}]/) {
+		# drop first slash
+		(my $a = $_[0]) =~ s{^/}{};
+		return exists $file2pack{$a} ? $file2pack{$a} : undef;
+	}
 
 	my @arg_found;
 	my $re = argv2re(map {
@@ -1861,7 +1902,8 @@ sub find {
 		$a = "*$a"
 			unless $a =~ s{^/+}{};
 		$a;
-	} @_);
+	# ignore $root at the start of file
+	} map { (my $a = $_) =~ s/^$root//; $a } @_);
 
 	if (keys %file2pack) {
 		for my $file (keys %file2pack) {
@@ -1882,6 +1924,7 @@ sub find {
 			my $line;
 			my $cnt = 0;
 			while($lst_fh->gzreadline($line)) {
+				chomp($line);
 				$file2pack{$line} = $pack;
 
 				if ($line =~ $re) {
@@ -1893,7 +1936,7 @@ sub find {
 					$arg_found[$a]++;
 					print "$pack:\n"
 						unless $cnt;
-					print "\t/$line";
+					print "\t/$line\n";
 					$cnt++;
 				}
 			}
@@ -2769,11 +2812,11 @@ sub argv2re {
 }
 
 sub argv2pack_re {
-	return (undef, [], [])
+	return (undef, [], [], [])
 		unless @_;
 
 	my $opt = @_ && ref $_[0] eq 'HASH' ? shift @_ : { };
-	my (@re, @t_rel, @t_ver);
+	my (@re, @t_rel, @t_ver, @pack);
 	for my $a (@_) {
 		# don't clobber contents of original array
 		local $_ = $a;
@@ -2788,6 +2831,7 @@ sub argv2pack_re {
 
  		push @t_rel, s{/(\S+)$}{} ? glob2re("^$1\$") : $target_release;
 		push @t_ver, s{=(\S+)$}{} ? glob2re("^$1\$") : undef;
+		push @pack, $_;
 
 		push @re, glob2re("^$_\$")."(?{ \$a = ".scalar(@re)." })";
 	}
@@ -2799,7 +2843,7 @@ sub argv2pack_re {
 	print STDERR "Match: $re\n"
 		if $debug;
 
-	return ($re, \@t_rel, \@t_ver);
+	return ($re, \@t_rel, \@t_ver, \@pack);
 }
 
 sub glob2re {
