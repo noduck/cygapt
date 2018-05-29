@@ -985,8 +985,10 @@ sub make_changes2 {
 
 		$post =~ s{^$root}{};
 		my $rc = 1; #system($root ? ('chroot', "$root/") : (), $post);
-		rename($root.$post, "$root$post.done")
-			unless $rc;
+		unless ($rc) {
+			unlink("$root$post.done");
+			rename($root.$post, "$root$post.done");
+		}
 	}
 
 	# run preremove for packages to be removed
