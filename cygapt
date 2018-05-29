@@ -711,14 +711,15 @@ sub update {
 	http_done();
 
 	$| = 1;
-	print "Reading state information... ";
-	get_installed(\'quiet');
-	get_available(\'quiet');
+	get_installed();
+	get_available();
 	my $u = list({ count_only => 1, upgradable => 1});
-	print "Done\n";
-	print "$u packages can be upgraded. ",
-		"Run 'cygapt list --upgradable' to see them.\n"
-		if $u;
+	if ($u) {
+		print "$u packages can be upgraded. ",
+			"Run 'cygapt list --upgradable' to see them.\n";
+	} else {
+		print "All packages are up to date.\n";
+	}
 }
 
 sub update_mirror {
@@ -745,14 +746,7 @@ sub update_mirror {
 	unless ($res) {
 		exit 10;
 	}
-	http_done();
 
-	get_installed();
-	get_available();
-	my $u = list({ count_only => 1, upgradable => 1});
-	print "$u packages can be upgraded. ",
-		"Run 'cygapt list --upgradable' to see them.\n"
-		if $u;
 }
 
 sub make_changes {
