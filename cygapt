@@ -46,6 +46,7 @@ a similar interface as APT on Debian. cygapt currently supports:
 	tag_sdesc => 'package manager for Cygwin, similar to Debian APT',
 	picked => 0,
 });
+my %provides;
 
 my $v = $package{cygapt}{versions}{"".VERSION} = {
 	tag_version => VERSION,
@@ -62,7 +63,7 @@ $package{cygapt}{tag_requires} = join(" ", @{$v->{deps}});
 $package{cygapt}{versions_sorted} = [ $v ];
 
 # fields in order (not showing install and source)
-my @field = (qw(sdesc ldesc category requires version depends2));
+my @field = (qw(sdesc ldesc category requires version depends2 provides));
 
 my ($dryrun, $verbose, $help);
 my $debug = 0;
@@ -82,6 +83,8 @@ my %common_opt = (
 
 my ($installed, $upgradable, $allversions, $target_release, $downgrades, $yes,
 	$downloadonly, $reinstall, $combine_or, $recurse, $fullrecurse);
+# packages that were warned about
+my $warn_pack = { };
 
 my @command = (
 	list => {
@@ -984,7 +987,7 @@ sub make_changes2 {
 			if $debug;
 
 		$post =~ s{^$root}{};
-		my $rc = 1; #system($root ? ('chroot', "$root/") : (), $post);
+		my $rc = system($root ? ('chroot', "$root/") : (), $post);
 		rename($root.$post, "$root$post.done")
 			unless $rc;
 	}
@@ -1398,11 +1401,23 @@ sub fix {
 
 		my $v = $p->{versions}{$p->{v_installed}};
 		for my $dep (@{$v->{deps}}) {
+			$dep = $provides{$dep}{package}
+				# should force version?
+				if exists $provides{$dep};
+
 			next
 				if exists $package{$dep}
 				&& $package{$dep}{v_installed};
 			print STDERR "W: Dependency $dep of package $pack is ",
 				"not installed\n";
+
+			unless (exists $package{$dep}) {
+				print STDERR "E: $dep was not found in ",
+					"package database, skipped\n"
+					unless exists $warn_pack->{$dep};
+				$warn_pack->{$dep}++;
+				next;
+			}
 
 			my $depp = $package{$dep};
 			select_package_versions($depp, 'now', undef);
@@ -1411,6 +1426,17 @@ sub fix {
 			my $depv = $depp->{versions}{$depp->{v_target}};
 			$add{$dep}++;
 			for my $depdep (@{$depv->{deps}}) {
+				$depdep = $provides{$depdep}{package}
+					if exists $provides{$depdep};
+				unless (exists $package{$depdep}) {
+					print STDERR "E: $depdep was not ",
+						"found in package database, ",
+						"skipped\n"
+						unless
+						exists $warn_pack->{$depdep};
+					$warn_pack->{$depdep}++;
+					next;
+				}
 				my $depdepp = $package{$depdep};
 				next
 					if $depdepp->{v_installed};
@@ -1544,7 +1570,8 @@ sub upgradable {
 
 		if (! $p->{v_target}) {
 			print STDERR "W: no installable version for $pack\n"
-				if $re;
+				if $re && ! exists $warn_pack->{$pack};
+			$warn_pack->{$pack}++;
 			next;
 		} elsif (! $p->{v_installed}) {
 			$install{$pack}++;
@@ -1715,7 +1742,9 @@ sub depends {
 	return $rc
 		if $opt->{depends}{$pack};
 	unless (exists $package{$pack}) {
-		print STDERR "E: no installable version for $pack\n";
+		print STDERR "E: no installable version for $pack\n"
+			unless exists $warn_pack->{$pack};
+		$warn_pack->{$pack}++;
 		return 0;
 	}
 	my $p = $package{$pack};
@@ -2428,6 +2457,13 @@ sub _available_store {
 	push @{$v->{releases}}, $rel;
 	for my $k (keys %$vals) {
 		$v->{$k} //= $vals->{$k};
+	}
+
+	if (exists $vals->{tag_provides}) {
+		$provides{$vals->{tag_provides}} = {
+			package => $pack,
+			version => $version,
+		};
 	}
 }
 
