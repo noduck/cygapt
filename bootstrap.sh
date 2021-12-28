@@ -130,7 +130,7 @@ get $mirror$arch/setup.bz2 | bzcat | while read line; do
 	fi
 
 	echo -en "\r"
-	get $mirror$path | tar -J -xf - -C /
+	get $mirror$path | tar --zstd -xf - -C /
 done
 
 ./cygapt update
