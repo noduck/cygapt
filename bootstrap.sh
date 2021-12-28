@@ -109,7 +109,6 @@ get $mirror$arch/setup.bz2 | bzcat | while read line; do
 		perl-IO-HTML) ;;
 		perl-LWP-MediaTypes) ;;
 		perl-URI) ;;
-		perl-HTTP-Daemon) ;;
 		perl-HTTP-Negotiate) ;;
 		perl-Net-HTTP) ;;
 		perl-Try-Tiny) ;;
@@ -129,8 +128,14 @@ get $mirror$arch/setup.bz2 | bzcat | while read line; do
 		continue
 	fi
 
+	comp=""
+	case "$path" in
+		*.zst) comp="--zstd";;
+		*.bz2) comp="-J";;
+		*.gz) comp="-j";;
+	esac
 	echo -en "\r"
-	get $mirror$path | tar --zstd -xf - -C /
+	get $mirror$path | tar $comp -xf - -C /
 done
 
 ./cygapt update
