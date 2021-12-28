@@ -1743,6 +1743,8 @@ sub depends {
 	$opt->{upgradable_level} //= { };
 	my $rc = 1;
 
+	$pack = $provides{$pack}{package}
+		if exists $provides{$pack};
 	return $rc
 		if $opt->{depends}{$pack};
 	unless (exists $package{$pack}) {
